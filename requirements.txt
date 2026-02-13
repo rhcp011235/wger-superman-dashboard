@@ -6,5 +6,8 @@ python-dotenv>=1.0.0
 pillow>=10.0.0
 pytesseract>=0.3.10
 
+# Sleep Number integration (optional)
+asyncsleepiq>=1.5.0
+
 # Optional: Better JSON handling
 simplejson>=3.19.0
