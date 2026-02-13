@@ -141,6 +141,141 @@ Track recurring meals automatically (e.g., daily protein shake):
 }
 ```
 
+## 🛏️ Sleep Number Integration
+
+### Overview
+
+Automatically sync sleep data from your Sleep Number smart bed to WGER:
+- **Sleep Duration** - Total time in bed (hours)
+- **Sleep Score** - SleepIQ quality score (0-100)
+- **Heart Rate** - Average BPM during sleep
+- **Respiratory Rate** - Average breaths per minute
+
+### Setup
+
+1. **Enable Sleep Number sync** in `.env`:
+```bash
+SLEEPNUMBER_SYNC=true
+SLEEPNUMBER_EMAIL=your_sleepnumber_email@example.com
+SLEEPNUMBER_PASSWORD=your_sleepnumber_password
+```
+
+2. **Ensure asyncsleepiq is installed** (included in `requirements.txt`):
+```bash
+pip3 install asyncsleepiq
+```
+
+3. **Test connection**:
+```bash
+cd scripts
+./daily_health_sync.py manual
+# You should see: "✅ Sleep Number: Connected to bed..."
+```
+
+### Daily Sync
+
+Sleep data is automatically synced when you run `daily_health_sync.py`:
+```bash
+./daily_health_sync.py screenshot.png
+
+🛏️ Sleep Number sync:
+   - Sleep duration: 7.5 hours
+   - Sleep score: 84
+   - Heart rate: 63 bpm
+   - Respiratory rate: 14 brpm
+✅ Posted to WGER
+```
+
+### Data Caching
+
+All sleep data is cached locally before posting to WGER:
+- **Location**: `sleep_cache/YYYY-MM-DD.json`
+- **Purpose**: Never lose data if WGER is down
+- **Contents**: Raw API response, timestamps, sleeper info
+
+To re-post cached data:
+```bash
+./repost_sleep_data.py --all          # Re-post all cached data
+./repost_sleep_data.py 2026-02-14     # Re-post specific date
+```
+
+### Historical Backfill
+
+Import ALL your historical sleep data (Sleep Number keeps ~2 years):
+
+**From specific date to today:**
+```bash
+./backfill_sleep_data.py --start 2024-01-01
+```
+
+**Last 365 days:**
+```bash
+./backfill_sleep_data.py --days 365
+```
+
+**All available data:**
+```bash
+./backfill_sleep_data.py --all
+```
+
+**Features:**
+- ✅ Fetches from Sleep Number API once
+- ✅ Caches to local JSON (never lose data!)
+- ✅ Posts to WGER from cache (safe retries)
+- ✅ Debug logging for audit trail
+- ✅ Rate limiting (0.5s between requests)
+- ✅ Progress tracking for long backlogs
+
+**Output:**
+```
+🚀 Starting Sleep Number backfill...
+   Start: 2024-01-01
+   End:   2026-02-13
+
+🔐 Logging into Sleep Number...
+✅ Connected to bed: Master Bed
+✅ Sleeper: John (Side.LEFT)
+
+📅 Fetching sleep data for 775 days...
+   2024-07-22: ✅ (Score: 86)
+   2024-07-23: ✅ (Score: 61)
+   2024-07-24: ✅ (Score: 67)
+   ...
+
+💾 Cached to: backfill_cache/sleepnumber_2024-01-01_to_2026-02-13.json
+
+📤 Posting to WGER...
+   ✅ 2024-07-22: 4 metrics (Score: 86, 7.8h)
+   ✅ 2024-07-23: 4 metrics (Score: 61, 8.2h)
+   ...
+
+✅ Sleep Number backfill complete!
+   Days posted: 210
+```
+
+## 📊 Historical Data Backfill
+
+### Withings Historical Sync
+
+Import ALL your historical Withings data (body weight, activity, body composition):
+
+```bash
+./backfill_all_data.py --days 365    # Last 365 days
+./backfill_all_data.py --start 2024-01-01  # From specific date
+```
+
+**What it syncs:**
+- Weight measurements
+- Body composition (fat %, muscle mass, bone mass, hydration)
+- Activity data (steps, distance, calories, elevation)
+- Heart rate (if tracked)
+
+**Smart features:**
+- Uses local cache to prevent API rate limiting
+- Fetches from Withings API once
+- Posts to WGER from cache (safe retries)
+- Retry logic with timeouts for reliability
+
 ## 📱 Daily Workflow
 
 ### Evening Routine (15 seconds)
