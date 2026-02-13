@@ -109,4 +109,4 @@ curl "https://your-server.com/weight_enhanced.php?format=json" > health.json
 
 ---
 
-**Need help?** Check the [full README](README.md) or open an [issue](https://github.com/yourusername/wger-superman-dashboard/issues).
+**Need help?** Check the [full README](README.md) or open an [issue](https://github.com/rhcp011235/wger-superman-dashboard/issues).

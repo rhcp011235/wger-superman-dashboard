@@ -72,7 +72,7 @@ A comprehensive health data aggregation and analysis platform that syncs Withing
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/yourusername/wger-superman-dashboard.git
+git clone https://github.com/rhcp011235/wger-superman-dashboard.git
 cd wger-superman-dashboard
 ```
 
@@ -356,8 +356,8 @@ Make sure your MFP screenshot clearly shows the main calorie number. If OCR fail
 
 ## 📞 Support
 
-- **Issues**: [GitHub Issues](https://github.com/yourusername/wger-superman-dashboard/issues)
-- **Discussions**: [GitHub Discussions](https://github.com/yourusername/wger-superman-dashboard/discussions)
+- **Issues**: [GitHub Issues](https://github.com/rhcp011235/wger-superman-dashboard/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/rhcp011235/wger-superman-dashboard/discussions)
 
 ---
 
