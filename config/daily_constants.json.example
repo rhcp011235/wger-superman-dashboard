@@ -1,0 +1,17 @@
+{
+  "daily_meals": [
+    {
+      "name": "ISO Protein Shake (2 scoops)",
+      "enabled": true,
+      "calories": 240,
+      "protein_g": 50,
+      "carbs_g": 6,
+      "fat_g": 2,
+      "fiber_g": 0,
+      "sugar_g": 2,
+      "sodium_mg": 200,
+      "notes": "⚠️ CHECK YOUR PROTEIN POWDER LABEL AND UPDATE THESE VALUES! This is an estimate for 2 scoops of typical whey isolate."
+    }
+  ],
+  "notes": "IMPORTANT: Verify the nutrition values above match YOUR protein powder! Check the label for 2 scoops. Add more meals here if you have other daily constants. Set enabled=false to temporarily disable."
+}

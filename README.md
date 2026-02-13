@@ -1,0 +1,364 @@
+# 🦸‍♂️ WGER Superman Dashboard
+
+> Your complete health tracking system with AI-powered insights
+
+A comprehensive health data aggregation and analysis platform that syncs Withings devices, MyFitnessPal nutrition, and WGER fitness tracking into a unified, ChatGPT-optimized JSON dashboard.
+
+## ✨ Features
+
+- **📊 Unified Health Dashboard** - All your health metrics in one place
+- **🔄 Auto-Sync from Multiple Sources**:
+  - Withings smart scales (weight, body composition, steps)
+  - MyFitnessPal (nutrition, macros via OCR)
+  - WGER fitness tracker (workouts, measurements)
+- **🤖 AI-Ready JSON Output** - Optimized for ChatGPT health analysis
+- **📈 Trend Tracking** - 7/30/90-day trends for weight, body composition
+- **💪 Muscle vs Fat Loss** - Track lean mass and fat mass separately
+- **🎯 Smart Calculations**:
+  - BMR/TDEE estimation (Mifflin-St Jeor equation)
+  - True calorie deficit (vs TDEE, not just MFP goal)
+  - Net calories after exercise
+- **🔐 Privacy-First** - All data stays on your server
+
+## 📸 What It Looks Like
+
+### Daily Sync (15 seconds)
+```bash
+./daily_health_sync.py screenshot.png
+
+✅ Withings sync complete: 24 activities, 13 weights, 7 body comp
+✅ MFP nutrition posted successfully!
+🎉 ALL DATA SYNCED!
+```
+
+### JSON Output (for ChatGPT)
+```json
+{
+  "date": "2026-02-11",
+  "weight": {
+    "current_lb": 196.22,
+    "trend_30d_lb": 201.12
+  },
+  "energy": {
+    "intake_kcal": 930,
+    "exercise_mfp_kcal": 804,
+    "net_kcal_vs_tdee": -979
+  },
+  "bodycomp": {
+    "bodyfat_pct": 28.24,
+    "lean_mass_kg": 63.87,
+    "fat_mass_kg": 25.13
+  },
+  "macros": {
+    "protein_g": 170,
+    "carbs_g": 91,
+    "fat_g": 37,
+    "sodium_mg": 2400
+  }
+}
+```
+
+## 🚀 Quick Start
+
+### Prerequisites
+
+- Python 3.8+
+- PHP 7.4+ (for API endpoint)
+- WGER instance (self-hosted or cloud)
+- Withings account with developer app
+- MyFitnessPal account (free tier OK)
+
+### Installation
+
+1. **Clone the repository**
+```bash
+git clone https://github.com/yourusername/wger-superman-dashboard.git
+cd wger-superman-dashboard
+```
+
+2. **Install Python dependencies**
+```bash
+pip3 install -r requirements.txt
+```
+
+3. **Configure environment**
+```bash
+cp .env.example .env
+# Edit .env with your credentials
+```
+
+4. **Set up daily constants** (optional)
+```bash
+cp config/daily_constants.json.example config/daily_constants.json
+# Edit with your regular meals (e.g., protein shake)
+```
+
+5. **Initial Withings OAuth**
+```bash
+cd scripts
+./daily_health_sync.py manual
+# Follow browser prompts to authorize Withings
+```
+
+## ⚙️ Configuration
+
+### Environment Variables
+
+Create a `.env` file in the project root:
+
+```bash
+# WGER Configuration
+WGER_BASE_URL=https://your-wger-instance.com
+WGER_TOKEN=your_wger_api_token_here
+
+# Withings OAuth
+WITHINGS_CLIENT_ID=your_client_id
+WITHINGS_CLIENT_SECRET=your_client_secret
+WITHINGS_REDIRECT_URI=http://localhost:8080/callback
+
+# Optional Settings
+DAYS_BACK=7                # How many days to sync from Withings
+CALS_GOAL_DEFAULT=1500     # Default calorie goal
+```
+
+### Daily Constants
+
+Track recurring meals automatically (e.g., daily protein shake):
+
+```json
+{
+  "daily_meals": [
+    {
+      "name": "Morning Protein Shake",
+      "enabled": true,
+      "calories": 240,
+      "protein_g": 50,
+      "carbs_g": 6,
+      "fat_g": 2,
+      "sodium_mg": 150
+    }
+  ]
+}
+```
+
+## 📱 Daily Workflow
+
+### Evening Routine (15 seconds)
+
+1. **Screenshot your MyFitnessPal daily summary**
+2. **AirDrop to your Mac** (or save locally)
+3. **Run the sync**:
+```bash
+./daily_health_sync.py ~/Downloads/mfp_screenshot.png
+```
+
+4. **Enter macros when prompted** (if not in screenshot):
+```
+⚠️  Macros not found in screenshot. Enter manually from MFP:
+   Protein (g) [Enter to skip]: 120
+   Carbs (g) [Enter to skip]: 85
+   Fat (g) [Enter to skip]: 35
+   Sodium (mg) [Enter to skip]: 2400
+```
+
+5. **Optional: Log digestion** (for scale correlation):
+```
+💩 Optional: Digestion log (for scale correlation)
+Had BM today? (y/n): y
+Quality (normal/small-hard/loose): normal
+```
+
+That's it! All data is synced to WGER.
+
+## 🤖 ChatGPT Integration
+
+### Get Your Health Data
+
+```bash
+curl "https://your-server.com/weight_enhanced.php?format=json&date=2026-02-11"
+```
+
+### Paste into ChatGPT and ask:
+
+- **"Have I lost muscle or just fat?"**
+- **"Am I eating enough protein?"**
+- **"When will I hit 175 lbs at this rate?"**
+- **"Why did the scale jump 2 lbs yesterday?"** (checks sodium, digestion)
+- **"Is my deficit too aggressive?"**
+- **"Show me my 30-day trends"**
+
+ChatGPT can now analyze:
+- Weight trends vs body composition
+- True calorie deficit (vs TDEE, not just MFP)
+- Muscle preservation
+- Sodium/water retention patterns
+- Digestion correlation with scale fluctuations
+
+## 📊 Data Contract (Guaranteed Units)
+
+All units are **locked and documented** for consistent ChatGPT analysis:
+
+- **Distance**: ALWAYS `km` (never miles or meters)
+- **Weight**: ALWAYS `lb` (never kg)
+- **Calories**: ALWAYS `kcal` (never kJ)
+- **Steps**: ALWAYS whole number (converted from ksteps)
+- **Body composition**: `bodyfat_pct` = %, mass values = kg
+- **Macros**: protein/carbs/fat = g, sodium = mg
+- **Hydration**: ALWAYS `ml` when tracked
+
+## 🏗️ Architecture
+
+```
+┌─────────────────┐
+│  Withings Scale │ (weight, body fat%, steps, distance)
+└────────┬────────┘
+         │
+         │  Auto-sync (last 7 days)
+         ▼
+┌─────────────────┐      ┌──────────────────┐
+│ MyFitnessPal    │─OCR─▶│ daily_health_    │
+│  Screenshot     │      │    sync.py       │
+└─────────────────┘      └────────┬─────────┘
+                                  │
+                         Posts to WGER API
+                                  │
+                                  ▼
+                         ┌─────────────────┐
+                         │  WGER Instance  │
+                         │  (Measurements) │
+                         └────────┬────────┘
+                                  │
+                          Reads and enhances
+                                  │
+                                  ▼
+                         ┌─────────────────┐
+                         │ weight_enhanced │
+                         │      .php       │
+                         └────────┬────────┘
+                                  │
+                          Outputs JSON/Text
+                                  │
+                                  ▼
+                         ┌─────────────────┐
+                         │    ChatGPT      │
+                         │   Analysis      │
+                         └─────────────────┘
+```
+
+## 🔧 API Endpoints
+
+### Get Health Data
+
+**Endpoint**: `GET /weight_enhanced.php`
+
+**Parameters**:
+- `format`: `json`, `text`, or `markdown` (default: `text`)
+- `date`: `YYYY-MM-DD` (default: today)
+
+**Examples**:
+```bash
+# JSON for ChatGPT
+curl "https://your-server.com/weight_enhanced.php?format=json&date=2026-02-11"
+
+# Human-readable text
+curl "https://your-server.com/weight_enhanced.php?format=text"
+
+# Markdown for documentation
+curl "https://your-server.com/weight_enhanced.php?format=markdown"
+```
+
+## 📦 Project Structure
+
+```
+wger-superman-dashboard/
+├── scripts/
+│   ├── daily_health_sync.py    # Main sync script
+│   └── weight_enhanced.php     # API endpoint
+├── config/
+│   └── daily_constants.json    # Recurring meals config
+├── docs/
+│   └── API.md                  # API documentation
+├── .env.example                # Environment template
+├── .gitignore                  # Git ignore rules
+├── requirements.txt            # Python dependencies
+├── README.md                   # This file
+└── LICENSE                     # MIT License
+```
+
+## 🛠️ Development
+
+### Adding New Measurements
+
+1. Create WGER measurement category:
+```python
+cat_id = wger_get_or_create_category("Vitamin D", "IU")
+```
+
+2. Post measurement:
+```python
+wger_post_measurement(date, cat_id, value, "Manual Entry")
+```
+
+3. Add to `weight_enhanced.php` output
+
+### Extending OCR
+
+To extract additional fields from MFP screenshots, update the regex in `parse_mfp_screenshot()`:
+
+```python
+# Example: Extract fiber
+fiber_match = re.search(r'Fiber\s+(\d+)g', text, re.IGNORECASE)
+if fiber_match:
+    nutrition['fiber_g'] = int(fiber_match.group(1))
+```
+
+## 🤝 Contributing
+
+Contributions welcome! Please:
+
+1. Fork the repository
+2. Create a feature branch (`git checkout -b feature/amazing-feature`)
+3. Commit your changes (`git commit -m 'Add amazing feature'`)
+4. Push to the branch (`git push origin feature/amazing-feature`)
+5. Open a Pull Request
+
+## 📄 License
+
+This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
+
+## 🙏 Acknowledgments
+
+- **WGER** - Open-source fitness tracker
+- **Withings** - Smart scale integration
+- **MyFitnessPal** - Nutrition tracking
+- **ChatGPT** - For calling this a "Superman Dashboard" 🦸‍♂️
+
+## 🐛 Troubleshooting
+
+### "No Withings tokens found"
+Run the script once in manual mode to complete OAuth:
+```bash
+./daily_health_sync.py manual
+```
+
+### "Steps showing as 273 instead of 13,000"
+The script auto-converts ksteps to steps. If you see wrong values, delete old measurements:
+```bash
+curl -X DELETE "https://your-wger.com/api/v2/measurement/{id}/" \
+  -H "Authorization: Token YOUR_TOKEN"
+```
+
+### "Body composition shows null"
+Make sure you're weighing on a Withings Body+ or Body Comp scale. Basic scales don't provide body composition data.
+
+### "OCR not finding calories"
+Make sure your MFP screenshot clearly shows the main calorie number. If OCR fails, the script will prompt for manual entry.
+
+## 📞 Support
+
+- **Issues**: [GitHub Issues](https://github.com/yourusername/wger-superman-dashboard/issues)
+- **Discussions**: [GitHub Discussions](https://github.com/yourusername/wger-superman-dashboard/discussions)
+
+---
+
+**Built with ❤️ for data-driven health optimization**
