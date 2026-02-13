@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """
 Daily Health Sync - Complete Unified Script
-Syncs Withings (steps, exercise, weight, body composition) + MFP (nutrition) to WGER
+Syncs Withings (steps, exercise, weight, body composition) + MFP (nutrition) + Sleep Number to WGER
 
 USAGE:
     ./daily_health_sync.py screenshot.png    # OCR mode (recommended)
@@ -14,6 +14,13 @@ WHAT IT SYNCS:
         - Distance (in km)
         - Active calories (kcal)
         - Body composition: fat %, muscle mass, bone mass, hydration
+
+    From Sleep Number (auto, if enabled):
+        - Sleep duration (hours)
+        - SleepIQ score (0-100)
+        - Average heart rate (bpm)
+        - Heart rate variability (HRV)
+        - Respiratory rate (breaths/min)
 
     From MFP Screenshot (OCR):
         - Food calories (kcal)
@@ -57,14 +64,35 @@ except ImportError:
     print("⚠️  OCR not available. Install: pip3 install pillow pytesseract")
     print("   You can still run manual mode without OCR")
 
+# Sleep Number imports
+if SLEEPNUMBER_SYNC:
+    try:
+        from asyncsleepiq import AsyncSleepIQ
+        import asyncio
+        SLEEPNUMBER_AVAILABLE = True
+    except ImportError:
+        print("⚠️  Sleep Number sync disabled: asyncsleepiq not installed")
+        print("   Install with: pip3 install asyncsleepiq")
+        SLEEPNUMBER_AVAILABLE = False
+else:
+    SLEEPNUMBER_AVAILABLE = False
+
 # =============================================================================
 # CONFIGURATION (Hardcoded as requested)
 # =============================================================================
+
+# Feature Flags
+SLEEPNUMBER_SYNC = os.getenv("SLEEPNUMBER_SYNC", "false").lower() == "true"
 
 # Withings OAuth
 WITHINGS_CLIENT_ID = os.getenv("WITHINGS_CLIENT_ID", "")
 WITHINGS_CLIENT_SECRET = os.getenv("WITHINGS_CLIENT_SECRET", "")
 WITHINGS_TOKEN_FILE = str(Path(__file__).parent / "withings_tokens.json")
+
+# Sleep Number Credentials
+SLEEPNUMBER_EMAIL = os.getenv("SLEEPNUMBER_EMAIL", "")
+SLEEPNUMBER_PASSWORD = os.getenv("SLEEPNUMBER_PASSWORD", "")
+SLEEPNUMBER_TOKEN_FILE = str(Path(__file__).parent / "sleepnumber_session.json")
 
 # WGER
 WGER_BASE = os.getenv('WGER_BASE_URL', 'https://localhost')
@@ -80,6 +108,11 @@ CATEGORY_SODIUM = None      # Will be auto-created - Daily Sodium (mg)
 CATEGORY_STEPS = None       # Will be auto-created from Withings
 CATEGORY_DISTANCE = None    # Will be auto-created from Withings
 CATEGORY_WITHINGS_CAL = None  # Withings exercise calories
+CATEGORY_SLEEP_DURATION = None  # Sleep duration (hours)
+CATEGORY_SLEEP_SCORE = None     # SleepIQ score (0-100)
+CATEGORY_SLEEP_HR = None        # Average heart rate (bpm)
+CATEGORY_SLEEP_HRV = None       # Heart rate variability
+CATEGORY_SLEEP_RR = None        # Respiratory rate (breaths/min)
 
 # Daily constants config
 SCRIPT_DIR = Path(__file__).parent
@@ -257,6 +290,159 @@ def withings_get_weight(access_token, start_ts, end_ts):
     if j.get("status") != 0:
         raise Exception(f"Withings getmeas failed: {j}")
     return j["body"]
+
+# =============================================================================
+# SLEEP NUMBER API
+# =============================================================================
+
+async def sleepnumber_get_sleep_data(email, password):
+    """Fetch Sleep Number sleep data from last night"""
+    try:
+        api = AsyncSleepIQ()
+
+        # Login
+        await api.login(email, password)
+
+        # Get beds
+        beds = api.beds
+        if not beds:
+            print("   ⚠️  No Sleep Number beds found")
+            return None
+
+        bed = beds[0]  # Use first bed
+
+        # Get sleep data for last night
+        # asyncsleepiq provides sleeper data with sleep metrics
+        sleepers = bed.sleepers
+        if not sleepers:
+            print("   ⚠️  No sleepers found")
+            return None
+
+        sleeper = sleepers[0]  # Primary sleeper
+
+        # Get sleep data
+        sleep_data = {
+            'duration_hours': None,
+            'sleep_score': None,
+            'avg_heart_rate': None,
+            'avg_hrv': None,
+            'avg_resp_rate': None,
+        }
+
+        # Sleep Number tracks "sleepData" which includes:
+        # - sleep session (in/out of bed times)
+        # - sleep score (SleepIQ score)
+        # - heart rate, HRV, respiratory rate
+
+        if hasattr(sleeper, 'sleep_number'):
+            sleep_data['sleep_score'] = sleeper.sleep_number
+
+        if hasattr(sleeper, 'sleep_data'):
+            data = sleeper.sleep_data
+            if data:
+                # Duration (convert to hours)
+                if 'totalSleepSessionTime' in data:
+                    sleep_data['duration_hours'] = round(data['totalSleepSessionTime'] / 3600, 2)
+
+                # Heart rate
+                if 'averageHeartRate' in data:
+                    sleep_data['avg_heart_rate'] = round(data['averageHeartRate'], 1)
+
+                # HRV
+                if 'averageHeartRateVariability' in data:
+                    sleep_data['avg_hrv'] = round(data['averageHeartRateVariability'], 1)
+
+                # Respiratory rate
+                if 'averageRespirationRate' in data:
+                    sleep_data['avg_resp_rate'] = round(data['averageRespirationRate'], 1)
+
+        await api.stop_websocket()
+        return sleep_data
+
+    except Exception as e:
+        print(f"   ⚠️  Sleep Number API error: {e}")
+        return None
+
+def sync_sleepnumber():
+    """Sync Sleep Number data"""
+    if not SLEEPNUMBER_SYNC or not SLEEPNUMBER_AVAILABLE:
+        return True  # Skip silently if disabled
+
+    print("\n" + "=" * 60)
+    print("😴 SYNCING SLEEP NUMBER DATA")
+    print("=" * 60)
+
+    if not SLEEPNUMBER_EMAIL or not SLEEPNUMBER_PASSWORD:
+        print("⚠️  Sleep Number credentials not configured (skipping)")
+        return True
+
+    try:
+        # Run async function
+        sleep_data = asyncio.run(sleepnumber_get_sleep_data(SLEEPNUMBER_EMAIL, SLEEPNUMBER_PASSWORD))
+
+        if not sleep_data:
+            print("⚠️  No sleep data available")
+            return True
+
+        # Get or create categories
+        global CATEGORY_SLEEP_DURATION, CATEGORY_SLEEP_SCORE, CATEGORY_SLEEP_HR
+        global CATEGORY_SLEEP_HRV, CATEGORY_SLEEP_RR
+
+        CATEGORY_SLEEP_DURATION = wger_get_or_create_category("Sleep Duration", "hours")
+        CATEGORY_SLEEP_SCORE = wger_get_or_create_category("Sleep Score", "score")
+        CATEGORY_SLEEP_HR = wger_get_or_create_category("Sleep Heart Rate", "bpm")
+        CATEGORY_SLEEP_HRV = wger_get_or_create_category("Sleep HRV", "ms")
+        CATEGORY_SLEEP_RR = wger_get_or_create_category("Sleep Respiratory Rate", "brpm")
+
+        # Post to WGER (use yesterday's date since this is last night's sleep)
+        from datetime import timedelta
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
+
+        success_count = 0
+
+        if sleep_data['duration_hours']:
+            success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_DURATION,
+                                                   sleep_data['duration_hours'], "Sleep Number")
+            if success:
+                print(f"   ✅ Sleep duration: {sleep_data['duration_hours']} hours ({action})")
+                success_count += 1
+
+        if sleep_data['sleep_score']:
+            success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_SCORE,
+                                                   sleep_data['sleep_score'], "Sleep Number")
+            if success:
+                print(f"   ✅ SleepIQ score: {sleep_data['sleep_score']} ({action})")
+                success_count += 1
+
+        if sleep_data['avg_heart_rate']:
+            success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_HR,
+                                                   sleep_data['avg_heart_rate'], "Sleep Number")
+            if success:
+                print(f"   ✅ Avg heart rate: {sleep_data['avg_heart_rate']} bpm ({action})")
+                success_count += 1
+
+        if sleep_data['avg_hrv']:
+            success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_HRV,
+                                                   sleep_data['avg_hrv'], "Sleep Number")
+            if success:
+                print(f"   ✅ Avg HRV: {sleep_data['avg_hrv']} ms ({action})")
+                success_count += 1
+
+        if sleep_data['avg_resp_rate']:
+            success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_RR,
+                                                   sleep_data['avg_resp_rate'], "Sleep Number")
+            if success:
+                print(f"   ✅ Avg respiratory rate: {sleep_data['avg_resp_rate']} brpm ({action})")
+                success_count += 1
+
+        print(f"\n✅ Sleep Number sync complete: {success_count} metrics")
+        return True
+
+    except Exception as e:
+        print(f"\n⚠️  Sleep Number sync failed (non-critical): {e}")
+        import traceback
+        traceback.print_exc()
+        return True  # Don't fail the whole script
 
 # =============================================================================
 # WGER API
@@ -820,16 +1006,21 @@ def main():
 
     arg = sys.argv[1]
 
-    # Step 1: Sync Withings
+    # Step 1: Sync Sleep Number (last night's data)
+    sleepnumber_ok = sync_sleepnumber()
+
+    # Step 2: Sync Withings
     withings_ok = sync_withings()
 
-    # Step 2: Sync MFP nutrition
+    # Step 3: Sync MFP nutrition
     nutrition_ok = sync_mfp_nutrition(arg)
 
     # Summary
     print("\n" + "=" * 60)
     print("📈 SYNC SUMMARY")
     print("=" * 60)
+    if SLEEPNUMBER_SYNC and SLEEPNUMBER_AVAILABLE:
+        print(f"   Sleep Number: {'✅ Success' if sleepnumber_ok else '❌ Failed'}")
     print(f"   Withings: {'✅ Success' if withings_ok else '❌ Failed'}")
     print(f"   Nutrition: {'✅ Success' if nutrition_ok else '❌ Failed'}")
     print("=" * 60)

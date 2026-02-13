@@ -662,6 +662,73 @@ try {
 
   $data['digestion'] = $digestion;
 
+  // Sleep data (from Sleep Number smart bed)
+  // Auto-synced from Sleep Number I8 if SLEEPNUMBER_SYNC is enabled
+  // Units: duration = hours, score = 0-100, heart rate = bpm, HRV = ms, respiratory rate = breaths/min
+  $sleep_data = null;
+  try {
+    // Sleep data is logged for the previous night, so we look at yesterday's measurements
+    // Categories created by daily_health_sync.py:
+    // - Sleep Duration (hours)
+    // - Sleep Score (0-100)
+    // - Sleep Heart Rate (bpm)
+    // - Sleep HRV (ms)
+    // - Sleep Respiratory Rate (brpm)
+
+    // Find category IDs for sleep metrics
+    $sleep_categories = [];
+    foreach ($categories as $cat) {
+      $name = $cat['name'] ?? '';
+      if (strpos($name, 'Sleep') === 0) {
+        $sleep_categories[$name] = $cat['id'];
+      }
+    }
+
+    if (!empty($sleep_categories)) {
+      $sleep_duration = null;
+      $sleep_score = null;
+      $sleep_hr = null;
+      $sleep_hrv = null;
+      $sleep_rr = null;
+
+      // Fetch each sleep metric
+      foreach ($sleep_categories as $name => $cat_id) {
+        $resp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/measurement/', [
+          'category' => $cat_id,
+          'date' => $date,
+          'limit' => 1,
+        ]);
+
+        $value = ($resp['results'][0]['value'] ?? null);
+        if ($value !== null) {
+          if (strpos($name, 'Duration') !== false) {
+            $sleep_duration = round($value, 2);
+          } elseif (strpos($name, 'Score') !== false) {
+            $sleep_score = round($value, 0);
+          } elseif (strpos($name, 'Heart Rate') !== false && strpos($name, 'HRV') === false) {
+            $sleep_hr = round($value, 1);
+          } elseif (strpos($name, 'HRV') !== false) {
+            $sleep_hrv = round($value, 1);
+          } elseif (strpos($name, 'Respiratory') !== false) {
+            $sleep_rr = round($value, 1);
+          }
+        }
+      }
+
+      $sleep_data = [
+        'duration_hours' => $sleep_duration,
+        'sleep_score' => $sleep_score,
+        'avg_heart_rate_bpm' => $sleep_hr,
+        'avg_hrv_ms' => $sleep_hrv,
+        'avg_respiratory_rate_brpm' => $sleep_rr,
+      ];
+    }
+  } catch (Throwable $e) {
+    // Sleep data not available
+  }
+
+  $data['sleep'] = $sleep_data;
+
   // ---------------------------------------------------------------------------
   // OUTPUT FORMATTING
   // ---------------------------------------------------------------------------
