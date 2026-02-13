@@ -1,0 +1,10 @@
+# Core dependencies
+requests>=2.31.0
+python-dotenv>=1.0.0
+
+# OCR for MyFitnessPal screenshots
+pillow>=10.0.0
+pytesseract>=0.3.10
+
+# Optional: Better JSON handling
+simplejson>=3.19.0
