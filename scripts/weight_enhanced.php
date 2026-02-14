@@ -758,11 +758,22 @@ try {
       echo " (" . ($data['nutrition']['remaining_calories'] > 0 ? '' : '') . round($data['nutrition']['remaining_calories']) . " remaining)";
     }
     echo "\n";
-    echo "- **Protein:** " . round($data['nutrition']['protein_g'], 1) . " g\n";
-    echo "- **Carbs:** " . round($data['nutrition']['carbs_g'], 1) . " g\n";
-    echo "- **Fat:** " . round($data['nutrition']['fat_g'], 1) . " g\n";
-    echo "- **Fiber:** " . round($data['nutrition']['fiber_g'], 1) . " g\n";
-    echo "- **Entries:** {$data['nutrition']['entries_count']}\n\n";
+    if (isset($data['nutrition']['protein_g']) && $data['nutrition']['protein_g'] !== null) {
+        echo "- **Protein:** " . round($data['nutrition']['protein_g'], 1) . " g\n";
+    }
+    if (isset($data['nutrition']['carbs_g']) && $data['nutrition']['carbs_g'] !== null) {
+        echo "- **Carbs:** " . round($data['nutrition']['carbs_g'], 1) . " g\n";
+    }
+    if (isset($data['nutrition']['fat_g']) && $data['nutrition']['fat_g'] !== null) {
+        echo "- **Fat:** " . round($data['nutrition']['fat_g'], 1) . " g\n";
+    }
+    if (isset($data['nutrition']['fiber_g']) && $data['nutrition']['fiber_g'] !== null) {
+        echo "- **Fiber:** " . round($data['nutrition']['fiber_g'], 1) . " g\n";
+    }
+    if (isset($data['nutrition']['entries_count'])) {
+        echo "- **Entries:** {$data['nutrition']['entries_count']}\n";
+    }
+    echo "\n";
 
     if (!empty($data['measurements']['categories'])) {
       echo "## Measurements\n";
