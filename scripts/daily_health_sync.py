@@ -27,9 +27,6 @@ WHAT IT SYNCS:
         - Exercise calories (kcal)
         - Macros: protein, carbs, fat (if visible in screenshot)
 
-    Daily Constants (auto-added):
-        - Protein shake: 240 kcal, 50g protein (from daily_constants.json)
-
     Optional Manual Tracking:
         - Digestion log (for scale correlation)
 
@@ -65,6 +62,7 @@ except ImportError:
     print("   You can still run manual mode without OCR")
 
 # Sleep Number imports
+SLEEPNUMBER_SYNC = True  # Set to False to disable Sleep Number sync
 if SLEEPNUMBER_SYNC:
     try:
         from asyncsleepiq import AsyncSleepIQ
@@ -78,48 +76,55 @@ else:
     SLEEPNUMBER_AVAILABLE = False
 
 # =============================================================================
-# CONFIGURATION (Hardcoded as requested)
+# CONFIGURATION (Hardcoded - Private Version)
 # =============================================================================
 
 # Feature Flags
-SLEEPNUMBER_SYNC = os.getenv("SLEEPNUMBER_SYNC", "false").lower() == "true"
+SLEEPNUMBER_SYNC_ENABLED = SLEEPNUMBER_SYNC and SLEEPNUMBER_AVAILABLE
 
 # Withings OAuth
-WITHINGS_CLIENT_ID = os.getenv("WITHINGS_CLIENT_ID", "")
-WITHINGS_CLIENT_SECRET = os.getenv("WITHINGS_CLIENT_SECRET", "")
+WITHINGS_CLIENT_ID = "your_withings_client_id_here"
+WITHINGS_CLIENT_SECRET = "your_withings_client_secret_here"
 WITHINGS_TOKEN_FILE = str(Path(__file__).parent / "withings_tokens.json")
 
 # Sleep Number Credentials
-SLEEPNUMBER_EMAIL = os.getenv("SLEEPNUMBER_EMAIL", "")
-SLEEPNUMBER_PASSWORD = os.getenv("SLEEPNUMBER_PASSWORD", "")
+SLEEPNUMBER_EMAIL = "john.b.hale@gmail.com"
+SLEEPNUMBER_PASSWORD = "vjz@kqw!WMF*bpr7ufa"
 SLEEPNUMBER_TOKEN_FILE = str(Path(__file__).parent / "sleepnumber_session.json")
 
 # WGER
-WGER_BASE = os.getenv('WGER_BASE_URL', 'https://localhost')
-WGER_TOKEN = os.getenv('WGER_TOKEN', '')
+WGER_BASE = 'https://your-wger-instance.com'
+WGER_TOKEN = 'your_wger_api_token_here'
 
 # WGER Measurement Categories (created once)
-CATEGORY_CALORIES = 18      # Daily Calories (kcal) - food
-CATEGORY_PROTEIN = 19       # Daily Protein (g)
-CATEGORY_CARBS = 20         # Daily Carbs (g)
-CATEGORY_FAT = 21           # Daily Fat (g)
-CATEGORY_EXERCISE = 22      # MFP Exercise Calories (kcal) - from MFP
-CATEGORY_SODIUM = None      # Will be auto-created - Daily Sodium (mg)
-CATEGORY_STEPS = None       # Will be auto-created from Withings
-CATEGORY_DISTANCE = None    # Will be auto-created from Withings
+CATEGORY_CALORIES = None    # Daily Calories (kcal) - food
+CATEGORY_PROTEIN = None     # Daily Protein (g)
+CATEGORY_CARBS = None       # Daily Carbs (g)
+CATEGORY_FAT = None         # Daily Fat (g)
+CATEGORY_EXERCISE = None    # MFP Exercise Calories (kcal) - from MFP
+CATEGORY_SODIUM = None      # Daily Sodium (mg)
+CATEGORY_STEPS = None       # Steps from Withings
+CATEGORY_DISTANCE = None    # Distance from Withings
 CATEGORY_WITHINGS_CAL = None  # Withings exercise calories
 CATEGORY_SLEEP_DURATION = None  # Sleep duration (hours)
 CATEGORY_SLEEP_SCORE = None     # SleepIQ score (0-100)
 CATEGORY_SLEEP_HR = None        # Average heart rate (bpm)
 CATEGORY_SLEEP_HRV = None       # Heart rate variability
 CATEGORY_SLEEP_RR = None        # Respiratory rate (breaths/min)
+CATEGORY_SLEEP_RESTFUL = None   # Restful sleep (hours)
+CATEGORY_SLEEP_RESTLESS = None  # Restless sleep (hours)
+CATEGORY_SLEEP_OUT_OF_BED = None  # Out of bed time (hours)
 
 # Daily constants config
 SCRIPT_DIR = Path(__file__).parent
 DAILY_CONSTANTS_FILE = SCRIPT_DIR / 'daily_constants.json'
 
+# Sleep data cache directory
+SLEEP_CACHE_DIR = SCRIPT_DIR / 'sleep_cache'
+SLEEP_CACHE_DIR.mkdir(exist_ok=True)
+
 # Sync window (days back for Withings)
-DAYS_BACK = 7
+DAYS_BACK = 7  # Daily sync window
 
 # =============================================================================
 # WITHINGS OAUTH & API
@@ -274,6 +279,23 @@ def withings_get_activity(access_token, start_ymd, end_ymd):
         raise Exception(f"Withings getactivity failed: {j}")
     return j["body"]
 
+def withings_get_workouts(access_token, start_ymd, end_ymd):
+    """Fetch Withings workout sessions (walking, running, etc.)"""
+    url = "https://wbsapi.withings.net/v2/measure"
+    data = {
+        "action": "getworkouts",
+        "access_token": access_token,
+        "startdateymd": start_ymd,
+        "enddateymd": end_ymd,
+        "data_fields": "steps,distance,duration,calories"
+    }
+    r = requests.post(url, data=data, timeout=60)
+    r.raise_for_status()
+    j = r.json()
+    if j.get("status") != 0:
+        raise Exception(f"Withings getworkouts failed: {j}")
+    return j["body"]
+
 def withings_get_weight(access_token, start_ts, end_ts):
     """Fetch Withings weight measurements"""
     url = "https://wbsapi.withings.net/measure"
@@ -298,10 +320,15 @@ def withings_get_weight(access_token, start_ts, end_ts):
 async def sleepnumber_get_sleep_data(email, password):
     """Fetch Sleep Number sleep data from last night"""
     try:
+        from datetime import timedelta
+
         api = AsyncSleepIQ()
 
         # Login
         await api.login(email, password)
+
+        # Initialize beds (REQUIRED!)
+        await api.init_beds()
 
         # Get beds
         beds = api.beds
@@ -309,10 +336,13 @@ async def sleepnumber_get_sleep_data(email, password):
             print("   ⚠️  No Sleep Number beds found")
             return None
 
-        bed = beds[0]  # Use first bed
+        # Get first bed (dict of beds)
+        bed = list(beds.values())[0] if beds else None
+        if not bed:
+            print("   ⚠️  No beds available")
+            return None
 
         # Get sleep data for last night
-        # asyncsleepiq provides sleeper data with sleep metrics
         sleepers = bed.sleepers
         if not sleepers:
             print("   ⚠️  No sleepers found")
@@ -327,77 +357,183 @@ async def sleepnumber_get_sleep_data(email, password):
             'avg_heart_rate': None,
             'avg_hrv': None,
             'avg_resp_rate': None,
+            'restful_hours': None,
+            'restless_hours': None,
+            'out_of_bed_hours': None,
+            'message': None,
+            'tip': None,
+            'sessions': [],
+            'tags': [],
         }
 
-        # Sleep Number tracks "sleepData" which includes:
-        # - sleep session (in/out of bed times)
-        # - sleep score (SleepIQ score)
-        # - heart rate, HRV, respiratory rate
+        # FETCH SLEEP DATA FROM API (required - not auto-populated!)
+        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
 
-        if hasattr(sleeper, 'sleep_number'):
-            sleep_data['sleep_score'] = sleeper.sleep_number
+        params = {
+            "date": yesterday,
+            "interval": "D1",
+            "sleeper": sleeper.sleeper_id,
+            "includeSlices": "false"
+        }
+        param_str = "&".join(f"{k}={v}" for k, v in params.items())
+        endpoint = f"sleepData?{param_str}"
 
-        if hasattr(sleeper, 'sleep_data'):
-            data = sleeper.sleep_data
+        try:
+            data = await api.get(endpoint)
+
             if data:
-                # Duration (convert to hours)
-                if 'totalSleepSessionTime' in data:
-                    sleep_data['duration_hours'] = round(data['totalSleepSessionTime'] / 3600, 2)
+                # Duration (convert seconds to hours)
+                # NOTE: totalSleepSessionTime is always 0, use 'inBed' instead
+                if data.get("inBed", 0) > 0:
+                    sleep_data["duration_hours"] = round(data["inBed"] / 3600, 2)
+
+                # Restful sleep time
+                if data.get("restful", 0) > 0:
+                    sleep_data["restful_hours"] = round(data["restful"] / 3600, 2)
+
+                # Restless sleep time
+                if data.get("restless", 0) > 0:
+                    sleep_data["restless_hours"] = round(data["restless"] / 3600, 2)
+
+                # Out of bed time
+                if data.get("outOfBed", 0) > 0:
+                    sleep_data["out_of_bed_hours"] = round(data["outOfBed"] / 3600, 2)
+
+                # Sleep score
+                if data.get("avgSleepIQ"):
+                    sleep_data["sleep_score"] = int(data["avgSleepIQ"])
 
                 # Heart rate
-                if 'averageHeartRate' in data:
-                    sleep_data['avg_heart_rate'] = round(data['averageHeartRate'], 1)
+                if data.get("avgHeartRate"):
+                    sleep_data["avg_heart_rate"] = int(data["avgHeartRate"])
 
-                # HRV
-                if 'averageHeartRateVariability' in data:
-                    sleep_data['avg_hrv'] = round(data['averageHeartRateVariability'], 1)
+                # HRV (if available - not always present)
+                if data.get("avgHeartRateVariability"):
+                    sleep_data["avg_hrv"] = int(data["avgHeartRateVariability"])
 
                 # Respiratory rate
-                if 'averageRespirationRate' in data:
-                    sleep_data['avg_resp_rate'] = round(data['averageRespirationRate'], 1)
+                if data.get("avgRespirationRate"):
+                    sleep_data["avg_resp_rate"] = int(data["avgRespirationRate"])
 
-        await api.stop_websocket()
+                # Sleep message and tip
+                if data.get("message"):
+                    sleep_data["message"] = data["message"]
+                if data.get("tip"):
+                    sleep_data["tip"] = data["tip"]
+
+                # Session details
+                if data.get("sleepData") and len(data["sleepData"]) > 0:
+                    sleep_day = data["sleepData"][0]
+
+                    # Extract sessions
+                    if sleep_day.get("sessions"):
+                        for session in sleep_day["sessions"]:
+                            sleep_data["sessions"].append({
+                                "start": session.get("startDate"),
+                                "end": session.get("endDate"),
+                                "duration_hours": round(session.get("inBed", 0) / 3600, 2) if session.get("inBed") else None,
+                                "sleep_number": session.get("sleepNumber"),
+                                "sleep_score": session.get("sleepQuotient"),
+                                "heart_rate": session.get("avgHeartRate"),
+                                "resp_rate": session.get("avgRespirationRate"),
+                                "restful_hours": round(session.get("restful", 0) / 3600, 2) if session.get("restful") else None,
+                                "restless_hours": round(session.get("restless", 0) / 3600, 2) if session.get("restless") else None,
+                                "is_longest": session.get("longest", False),
+                            })
+
+                    # Extract tags
+                    if sleep_day.get("tags"):
+                        sleep_data["tags"] = sleep_day["tags"]
+
+        except Exception as e:
+            print(f"   ⚠️  Error fetching sleep data: {e}")
+            # Return empty data rather than None
+
+        # Clean up (method might not exist in all versions)
+        try:
+            if hasattr(api, 'stop_websocket'):
+                await api.stop_websocket()
+        except:
+            pass
+
         return sleep_data
 
     except Exception as e:
         print(f"   ⚠️  Sleep Number API error: {e}")
         return None
 
+def save_sleep_to_cache(date, sleep_data, sleeper_name="John"):
+    """Save sleep data to local cache"""
+    cache_file = SLEEP_CACHE_DIR / f"{date}.json"
+
+    cache_entry = {
+        'date': date,
+        'fetched_at': datetime.now().isoformat(),
+        'sleeper': sleeper_name,
+        'data': sleep_data
+    }
+
+    with open(cache_file, 'w') as f:
+        json.dump(cache_entry, f, indent=2)
+
+    print(f"   💾 Cached to: {cache_file.name}")
+    return cache_file
+
 def sync_sleepnumber():
-    """Sync Sleep Number data"""
-    if not SLEEPNUMBER_SYNC or not SLEEPNUMBER_AVAILABLE:
+    """Sync Sleep Number data with local caching"""
+    if not SLEEPNUMBER_SYNC_ENABLED:
         return True  # Skip silently if disabled
 
     print("\n" + "=" * 60)
     print("😴 SYNCING SLEEP NUMBER DATA")
     print("=" * 60)
 
-    if not SLEEPNUMBER_EMAIL or not SLEEPNUMBER_PASSWORD:
+    if not SLEEPNUMBER_EMAIL or not SLEEPNUMBER_PASSWORD or SLEEPNUMBER_EMAIL == "your_email@example.com":
         print("⚠️  Sleep Number credentials not configured (skipping)")
         return True
 
     try:
-        # Run async function
-        sleep_data = asyncio.run(sleepnumber_get_sleep_data(SLEEPNUMBER_EMAIL, SLEEPNUMBER_PASSWORD))
+        # Use yesterday's date (last night's sleep)
+        from datetime import timedelta
+        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
-        if not sleep_data:
-            print("⚠️  No sleep data available")
-            return True
+        # Check if already cached
+        cache_file = SLEEP_CACHE_DIR / f"{yesterday}.json"
+        if cache_file.exists():
+            print(f"📂 Found cached sleep data for {yesterday}")
+            print(f"   Loading from cache...")
+            with open(cache_file, 'r') as f:
+                cached = json.load(f)
+            sleep_data = cached.get('data', {})
+        else:
+            # Fetch from Sleep Number API
+            print(f"🌐 Fetching sleep data from Sleep Number...")
+            sleep_data = asyncio.run(sleepnumber_get_sleep_data(SLEEPNUMBER_EMAIL, SLEEPNUMBER_PASSWORD))
+
+            if not sleep_data:
+                print("⚠️  No sleep data available (might not have slept yet)")
+                return True
+
+            # Cache the data BEFORE posting to WGER
+            save_sleep_to_cache(yesterday, sleep_data)
+            print(f"   ✅ Sleep data cached locally")
 
         # Get or create categories
         global CATEGORY_SLEEP_DURATION, CATEGORY_SLEEP_SCORE, CATEGORY_SLEEP_HR
-        global CATEGORY_SLEEP_HRV, CATEGORY_SLEEP_RR
+        global CATEGORY_SLEEP_HRV, CATEGORY_SLEEP_RR, CATEGORY_SLEEP_RESTFUL
+        global CATEGORY_SLEEP_RESTLESS, CATEGORY_SLEEP_OUT_OF_BED
 
         CATEGORY_SLEEP_DURATION = wger_get_or_create_category("Sleep Duration", "hours")
         CATEGORY_SLEEP_SCORE = wger_get_or_create_category("Sleep Score", "score")
         CATEGORY_SLEEP_HR = wger_get_or_create_category("Sleep Heart Rate", "bpm")
         CATEGORY_SLEEP_HRV = wger_get_or_create_category("Sleep HRV", "ms")
         CATEGORY_SLEEP_RR = wger_get_or_create_category("Sleep Respiratory Rate", "brpm")
+        CATEGORY_SLEEP_RESTFUL = wger_get_or_create_category("Sleep Restful", "hours")
+        CATEGORY_SLEEP_RESTLESS = wger_get_or_create_category("Sleep Restless", "hours")
+        CATEGORY_SLEEP_OUT_OF_BED = wger_get_or_create_category("Sleep Out of Bed", "hours")
 
-        # Post to WGER (use yesterday's date since this is last night's sleep)
-        from datetime import timedelta
-        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-
+        # Post to WGER from cached data
+        print(f"\n📤 Posting to WGER...")
         success_count = 0
 
         if sleep_data['duration_hours']:
@@ -435,6 +571,27 @@ def sync_sleepnumber():
                 print(f"   ✅ Avg respiratory rate: {sleep_data['avg_resp_rate']} brpm ({action})")
                 success_count += 1
 
+        if sleep_data.get('restful_hours'):
+            success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_RESTFUL,
+                                                   sleep_data['restful_hours'], "Sleep Number")
+            if success:
+                print(f"   ✅ Restful sleep: {sleep_data['restful_hours']} hours ({action})")
+                success_count += 1
+
+        if sleep_data.get('restless_hours'):
+            success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_RESTLESS,
+                                                   sleep_data['restless_hours'], "Sleep Number")
+            if success:
+                print(f"   ✅ Restless sleep: {sleep_data['restless_hours']} hours ({action})")
+                success_count += 1
+
+        if sleep_data.get('out_of_bed_hours'):
+            success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_OUT_OF_BED,
+                                                   sleep_data['out_of_bed_hours'], "Sleep Number")
+            if success:
+                print(f"   ✅ Out of bed: {sleep_data['out_of_bed_hours']} hours ({action})")
+                success_count += 1
+
         print(f"\n✅ Sleep Number sync complete: {success_count} metrics")
         return True
 
@@ -457,9 +614,10 @@ def wger_headers():
 
 def wger_get_or_create_category(name, unit):
     """Get or create WGER measurement category"""
-    # Check if exists
+    # Check if exists (use limit to get all categories, avoiding pagination issues)
     r = requests.get(
         f"{WGER_BASE}/api/v2/measurement-category/",
+        params={'limit': 1000},  # Get all categories at once
         headers=wger_headers(),
         timeout=30
     )
@@ -605,22 +763,54 @@ def parse_mfp_screenshot(image_path):
         'exercise_cals': 0,
     }
 
-    # Parse: "1,500 - 690 + 804 = 1,614"
-    #         Goal   Food  Exercise  Remaining
-    pattern = r'(\d+,?\d*)\s*-\s*(\d+,?\d*)\s*\+\s*(\d+,?\d*)'
-    match = re.search(pattern, text)
+    # Try multiple patterns to extract data
+    # Pattern 1: "1,500 - 690 + 804 = 1,614"
+    #              Goal   Food  Exercise  Remaining
+    pattern1 = r'(\d+,?\d*)\s*-\s*(\d+,?\d*)\s*\+\s*(\d+,?\d*)\s*=\s*(\d+,?\d*)'
+    match = re.search(pattern1, text)
     if match:
         nutrition['calories'] = int(match.group(2).replace(',', ''))
         nutrition['exercise_cals'] = int(match.group(3).replace(',', ''))
+        print(f"   ✅ Formula match: Food={nutrition['calories']}, Exercise={nutrition['exercise_cals']}")
     else:
-        # Fallback: "690\nFood"
-        food_match = re.search(r'(\d+,?\d*)\s*\n\s*Food', text, re.IGNORECASE)
-        if food_match:
-            nutrition['calories'] = int(food_match.group(1).replace(',', ''))
+        # Pattern 2: Look for Goal/Food/Exercise/Remaining labels with flexible matching
+        # Try to find numbers near these labels (more flexible)
+        goal_match = re.search(r'(\d+,?\d*)\s*\n?\s*Goal', text, re.IGNORECASE)
+        food_match = re.search(r'(\d+,?\d*)\s*\n?\s*Food', text, re.IGNORECASE)
+        exercise_match = re.search(r'(\d+,?\d*)\s*\n?\s*Exercise', text, re.IGNORECASE)
+        remaining_match = re.search(r'(\d+,?\d*)\s*\n?\s*Remaining', text, re.IGNORECASE)
 
-        exercise_match = re.search(r'(\d+,?\d*)\s*\n\s*Exercise', text, re.IGNORECASE)
-        if exercise_match:
-            nutrition['exercise_cals'] = int(exercise_match.group(1).replace(',', ''))
+        # Try to calculate Food using the formula: Goal - Food + Exercise = Remaining
+        # Rearranged: Food = Goal + Exercise - Remaining
+        if goal_match and exercise_match and remaining_match:
+            goal = int(goal_match.group(1).replace(',', ''))
+            exercise = int(exercise_match.group(1).replace(',', ''))
+            remaining = int(remaining_match.group(1).replace(',', ''))
+
+            # Calculate Food
+            calculated_food = goal + exercise - remaining
+
+            # If we found Food via OCR, verify it matches the calculation
+            if food_match:
+                ocr_food = int(food_match.group(1).replace(',', ''))
+                if abs(ocr_food - calculated_food) > 10:
+                    # OCR is wrong, use calculation
+                    print(f"   ⚠️  OCR Food={ocr_food} doesn't match calculation={calculated_food}, using calculation")
+                    nutrition['calories'] = calculated_food
+                else:
+                    nutrition['calories'] = ocr_food
+            else:
+                # No Food OCR, use calculation
+                nutrition['calories'] = calculated_food
+                print(f"   ℹ️  Calculated Food from Goal+Exercise-Remaining: {nutrition['calories']}")
+
+            nutrition['exercise_cals'] = exercise
+        elif food_match:
+            # Found Food but couldn't verify via calculation
+            nutrition['calories'] = int(food_match.group(1).replace(',', ''))
+            if exercise_match:
+                nutrition['exercise_cals'] = int(exercise_match.group(1).replace(',', ''))
+            print(f"   ⚠️  Using OCR Food={nutrition['calories']} (couldn't verify via calculation)")
 
     return nutrition
 
@@ -675,14 +865,22 @@ def load_daily_constants():
     return [m for m in config.get('daily_meals', []) if m.get('enabled', True)]
 
 def combine_with_constants(nutrition, constants):
-    """Add daily constants to nutrition"""
+    """Add daily constants to nutrition, but only for macros that weren't manually entered"""
     combined = nutrition.copy()
     for c in constants:
+        # Always add calories (shake calories count as food)
         combined['calories'] += c.get('calories', 0)
-        combined['protein_g'] += c.get('protein_g', 0)
-        combined['carbs_g'] += c.get('carbs_g', 0)
-        combined['fat_g'] += c.get('fat_g', 0)
-        combined['sodium_mg'] += c.get('sodium_mg', 0)
+
+        # Only add macros if they weren't manually entered (i.e., are 0)
+        # If user entered a value, use that instead (override)
+        if combined['protein_g'] == 0:
+            combined['protein_g'] += c.get('protein_g', 0)
+        if combined['carbs_g'] == 0:
+            combined['carbs_g'] += c.get('carbs_g', 0)
+        if combined['fat_g'] == 0:
+            combined['fat_g'] += c.get('fat_g', 0)
+        if combined['sodium_mg'] == 0:
+            combined['sodium_mg'] += c.get('sodium_mg', 0)
     return combined
 
 # =============================================================================
@@ -719,6 +917,21 @@ def sync_withings():
         # DEBUG: Show count
         print(f"   Found {len(activity.get('activities', []))} days of activity data")
 
+        # Get workout data (for accurate distance)
+        print("🏃 Fetching workout data (for accurate distance)...")
+        workouts_data = withings_get_workouts(access_token, start_ymd, end_ymd)
+
+        # Build map of date -> workout distance (in meters)
+        workout_distances = {}
+        for workout in workouts_data.get('series', []):
+            workout_date = workout.get('date')
+            workout_dist = workout.get('data', {}).get('distance')
+            if workout_date and workout_dist:
+                # Sum up all workouts for the day
+                workout_distances[workout_date] = workout_distances.get(workout_date, 0) + workout_dist
+
+        print(f"   Found {len(workout_distances)} days with workout distance")
+
         # Get or create categories (use ksteps to avoid 5-digit limitation)
         global CATEGORY_STEPS, CATEGORY_DISTANCE, CATEGORY_WITHINGS_CAL
         CATEGORY_STEPS = wger_get_or_create_category("Steps", "ksteps")  # Must use ksteps (max 4 digits)
@@ -740,12 +953,25 @@ def sync_withings():
                 if success:
                     activity_count += 1
 
-            if "distance" in day and day["distance"] is not None and day["distance"] > 0:
+            # Use workout distance if available (more accurate), otherwise use activity distance
+            distance_meters = None
+            source = "activity"
+
+            if date in workout_distances:
+                # Prefer workout distance (accurate from actual workouts)
+                distance_meters = workout_distances[date]
+                source = "workout"
+            elif "distance" in day and day["distance"] is not None and day["distance"] > 0:
+                # Fallback to activity distance (may include passive movement)
+                distance_meters = day["distance"]
+                source = "activity"
+
+            if distance_meters:
                 # Convert meters to km and round to 2 decimals
-                distance_km = round(float(day["distance"]) / 1000, 2)
+                distance_km = round(float(distance_meters) / 1000, 2)
                 distance_mi = round(distance_km * 0.621371, 2)  # km to miles
                 success, action = wger_post_measurement(date, CATEGORY_DISTANCE, distance_km, "Withings")
-                print(f"   {'✅' if success else '❌'} {date}: {distance_km} km ({distance_mi} mi) ({action})")
+                print(f"   {'✅' if success else '❌'} {date}: {distance_km} km ({distance_mi} mi) from {source} ({action})")
                 if success:
                     activity_count += 1
 
@@ -773,6 +999,11 @@ def sync_withings():
         cat_muscle = wger_get_or_create_category("Muscle Mass", "kg")
         cat_bone = wger_get_or_create_category("Bone Mass", "kg")
         cat_hydration = wger_get_or_create_category("Hydration", "%")
+
+        # NEW: Additional health metrics
+        cat_visceral_fat = wger_get_or_create_category("Visceral Fat", "index")
+        cat_bmr = wger_get_or_create_category("Basal Metabolic Rate", "kcal")
+        cat_metabolic_age = wger_get_or_create_category("Metabolic Age", "years")
 
         for grp in weight_data.get("measuregrps", []):
             ts = int(grp.get("date", 0))
@@ -835,6 +1066,27 @@ def sync_withings():
                         print(f"   ✅ {date}: {value:.2f} kg bone ({action})")
                         bodycomp_count += 1
 
+                # Type 170: Visceral Fat Index
+                elif mtype == 170:
+                    success, action = wger_post_measurement(date, cat_visceral_fat, round(value, 1), "Withings")
+                    if success:
+                        print(f"   ✅ {date}: {value:.1f} visceral fat index ({action})")
+                        bodycomp_count += 1
+
+                # Type 226: Basal Metabolic Rate (BMR) in kcal/day
+                elif mtype == 226:
+                    success, action = wger_post_measurement(date, cat_bmr, int(round(value)), "Withings")
+                    if success:
+                        print(f"   ✅ {date}: {int(value)} kcal/day BMR ({action})")
+                        bodycomp_count += 1
+
+                # Type 227: Metabolic Age in years
+                elif mtype == 227:
+                    success, action = wger_post_measurement(date, cat_metabolic_age, int(round(value)), "Withings")
+                    if success:
+                        print(f"   ✅ {date}: {int(value)} years metabolic age ({action})")
+                        bodycomp_count += 1
+
         print(f"\n✅ Withings sync complete: {activity_count} activities, {weight_count} weights, {bodycomp_count} body comp")
         return True
 
@@ -868,14 +1120,7 @@ def sync_mfp_nutrition(arg):
     print("\n" + "=" * 60)
     print("🍎 SYNCING MFP NUTRITION")
     print("=" * 60)
-
-    # Load daily constants
-    constants = load_daily_constants()
-    if constants:
-        print("\n📋 Daily constants:")
-        for c in constants:
-            print(f"   • {c['name']}: {c['calories']} kcal")
-        print()
+    print("\nNote: MFP is the source of truth. Enter all food (including shakes) in MFP.\n")
 
     # Get nutrition data
     if arg == 'manual':
@@ -923,44 +1168,48 @@ def sync_mfp_nutrition(arg):
     print(f"   Fat:      {nutrition['fat_g']}g")
     print(f"   Sodium:   {nutrition['sodium_mg']}mg")
 
-    # Combine with constants
-    if constants:
-        combined = combine_with_constants(nutrition, constants)
-        constants_cals = sum(c['calories'] for c in constants)
-        print(f"\n➕ Added {constants_cals} kcal from daily constants")
-    else:
-        combined = nutrition
-
+    # MFP is the source of truth - use data as-is (no daily constants added)
+    # User enters everything in MFP daily, including protein shakes
     print("\n" + "═" * 60)
-    print("📊 TOTAL DAILY NUTRITION")
+    print("📊 TOTAL DAILY NUTRITION (from MFP)")
     print("═" * 60)
-    print(f"   Calories (Food): {combined['calories']} kcal")
-    print(f"   Exercise Burned: {combined.get('exercise_cals', 0)} kcal")
-    net_cals = combined['calories'] - combined.get('exercise_cals', 0)
+    print(f"   Calories (Food): {nutrition['calories']} kcal")
+    print(f"   Exercise Burned: {nutrition.get('exercise_cals', 0)} kcal")
+    net_cals = nutrition['calories'] - nutrition.get('exercise_cals', 0)
     print(f"   Net Calories:    {net_cals} kcal")
-    print(f"   Protein:  {combined['protein_g']}g")
-    print(f"   Carbs:    {combined['carbs_g']}g")
-    print(f"   Fat:      {combined['fat_g']}g")
-    print(f"   Sodium:   {combined['sodium_mg']}mg")
+    print(f"   Protein:  {nutrition['protein_g']}g")
+    print(f"   Carbs:    {nutrition['carbs_g']}g")
+    print(f"   Fat:      {nutrition['fat_g']}g")
+    print(f"   Sodium:   {nutrition['sodium_mg']}mg")
     print("═" * 60)
 
     # Post to WGER
     print("\n📤 Posting nutrition to WGER...")
 
-    date = combined['date']
+    date = nutrition['date']
 
-    # Get or create sodium category
-    global CATEGORY_SODIUM
+    # Get or create nutrition categories (finds existing ones from CSV import)
+    global CATEGORY_CALORIES, CATEGORY_PROTEIN, CATEGORY_CARBS, CATEGORY_FAT, CATEGORY_EXERCISE, CATEGORY_SODIUM
+    if CATEGORY_CALORIES is None:
+        CATEGORY_CALORIES = wger_get_or_create_category("Daily Calories", "kcal")
+    if CATEGORY_PROTEIN is None:
+        CATEGORY_PROTEIN = wger_get_or_create_category("Daily Protein", "g")
+    if CATEGORY_CARBS is None:
+        CATEGORY_CARBS = wger_get_or_create_category("Daily Carbs", "g")
+    if CATEGORY_FAT is None:
+        CATEGORY_FAT = wger_get_or_create_category("Daily Fat", "g")
+    if CATEGORY_EXERCISE is None:
+        CATEGORY_EXERCISE = wger_get_or_create_category("MFP Exercise Calories", "kcal")
     if CATEGORY_SODIUM is None:
         CATEGORY_SODIUM = wger_get_or_create_category("Daily Sodium", "mg")
 
     measurements = [
-        (CATEGORY_CALORIES, combined['calories'], "Daily Calories"),
-        (CATEGORY_EXERCISE, combined.get('exercise_cals', 0), "MFP Exercise Calories"),
-        (CATEGORY_PROTEIN, combined['protein_g'], "Daily Protein"),
-        (CATEGORY_CARBS, combined['carbs_g'], "Daily Carbs"),
-        (CATEGORY_FAT, combined['fat_g'], "Daily Fat"),
-        (CATEGORY_SODIUM, combined['sodium_mg'], "Daily Sodium"),
+        (CATEGORY_CALORIES, nutrition['calories'], "Daily Calories"),
+        (CATEGORY_EXERCISE, nutrition.get('exercise_cals', 0), "MFP Exercise Calories"),
+        (CATEGORY_PROTEIN, nutrition['protein_g'], "Daily Protein"),
+        (CATEGORY_CARBS, nutrition['carbs_g'], "Daily Carbs"),
+        (CATEGORY_FAT, nutrition['fat_g'], "Daily Fat"),
+        (CATEGORY_SODIUM, nutrition['sodium_mg'], "Daily Sodium"),
     ]
 
     success_count = 0
@@ -1019,7 +1268,7 @@ def main():
     print("\n" + "=" * 60)
     print("📈 SYNC SUMMARY")
     print("=" * 60)
-    if SLEEPNUMBER_SYNC and SLEEPNUMBER_AVAILABLE:
+    if SLEEPNUMBER_SYNC_ENABLED:
         print(f"   Sleep Number: {'✅ Success' if sleepnumber_ok else '❌ Failed'}")
     print(f"   Withings: {'✅ Success' if withings_ok else '❌ Failed'}")
     print(f"   Nutrition: {'✅ Success' if nutrition_ok else '❌ Failed'}")

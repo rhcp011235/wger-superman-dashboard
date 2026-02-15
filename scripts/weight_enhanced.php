@@ -3,32 +3,30 @@
  * Enhanced WGER Data Feed - ChatGPT-Optimized Health Dashboard
  *
  * Data Contract (units are locked and guaranteed):
- * - Distance: ALWAYS km (never miles or meters)
- * - Weight: ALWAYS lb (never kg)
+ * - Distance: ALWAYS miles (never km or meters)
+ * - Weight: ALWAYS lbs (never kg)
  * - Calories: ALWAYS kcal (never kJ)
  * - Steps: ALWAYS whole number (converted from ksteps)
- * - Body composition: bodyfat_pct = %, mass values = kg, hydration = %
+ * - Body composition: bodyfat_pct = %, mass values = lbs (converted from kg), hydration = %
  * - Hydration: ALWAYS ml when tracked
  *
- * Output formats: ?format=text (default), json, markdown
+ * Output formats: ?format=html (default), text, json, markdown
  * Date parameter: ?date=YYYY-MM-DD (defaults to today)
  */
 declare(strict_types=1);
 
+// Set timezone to Eastern Time for all date/time displays
+date_default_timezone_set('America/New_York');
+
 header('Content-Type: text/plain; charset=utf-8');
 
-$WGER_BASE  = rtrim(getenv('WGER_BASE_URL') ?: 'https://localhost');
-$WGER_TOKEN = getenv('WGER_TOKEN') ?: '';
+// PRIVATE VERSION - Hardcoded credentials (DO NOT commit to git!)
+$WGER_BASE  = 'https://your-wger-instance.com';
+$WGER_TOKEN = 'your_wger_api_token_here';
 
-if ($WGER_TOKEN === '') {
-  http_response_code(500);
-  echo "ERROR: missing WGER_TOKEN\n";
-  exit;
-}
-
-$date = $_GET['date'] ?? gmdate('Y-m-d');
+$date = $_GET['date'] ?? date('Y-m-d'); // Use LOCAL date, not UTC
 $requestedDate = $date;
-$format = $_GET['format'] ?? 'text'; // text, json, or markdown
+$format = $_GET['format'] ?? 'html'; // html (default), text, json, or markdown
 
 // ============================================================================
 // HELPER FUNCTIONS
@@ -102,7 +100,7 @@ function calculate_trend(array $entries, string $endDate, int $days, string $fie
 try {
   $data = [
     'date' => $date,
-    'generated_at' => gmdate('Y-m-d H:i:s') . ' UTC',
+    'generated_at' => date('Y-m-d H:i:s T'), // Local time with timezone
   ];
 
   // ---------------------------------------------------------------------------
@@ -141,62 +139,128 @@ try {
     'total_entries' => count($weightEntries),
   ];
 
-  // Weight change calculations
-  if ($weight_lb !== null && count($weightEntries) > 1) {
-    $earliest = end($weightEntries);
-    $earliest_weight = try_number($earliest['weight']);
-    if ($earliest_weight !== null) {
-      $data['weight']['total_change_lb'] = round($weight_lb - $earliest_weight, 2);
-      $data['weight']['earliest_date'] = $earliest['date'] ?? null;
+  // Weight change calculations from fitness journey starting point
+  // Starting point: August 12, 2025 at 265 lbs (decision to lose weight)
+  $fitness_start_date = '2025-08-12';
+  $fitness_start_weight = 265.0;
+
+  if ($weight_lb !== null) {
+    // Find actual weight entry on or near starting date
+    $starting_weight = $fitness_start_weight;
+    foreach ($weightEntries as $w) {
+      $wDate = extract_date($w['date'] ?? '');
+      if ($wDate === $fitness_start_date) {
+        $found_weight = try_number($w['weight']);
+        // Use the 265 lb entry if it exists, otherwise use the default
+        if ($found_weight !== null && abs($found_weight - 265.0) < 1) {
+          $starting_weight = $found_weight;
+          break;
+        }
+      }
     }
+
+    $data['weight']['total_change_lb'] = round($weight_lb - $starting_weight, 2);
+    $data['weight']['starting_weight_lb'] = $starting_weight;
+    $data['weight']['starting_date'] = $fitness_start_date;
   }
 
   // ---------------------------------------------------------------------------
-  // 2. NUTRITION DATA (Calories + Macros)
+  // 2. NUTRITION DATA (Calories + Macros + Sodium)
   // ---------------------------------------------------------------------------
-  // Read nutrition data from WGER measurements (posted by sync_mfp_wger.py)
-  // Category IDs:
-  //   18 = Daily Calories (kcal)
-  //   19 = Daily Protein (g)
-  //   20 = Daily Carbs (g)
-  //   21 = Daily Fat (g)
-  //   22 = MFP Exercise Calories (kcal)
+  // Read nutrition data from WGER measurements (MFP CSV import)
+  // Category IDs (checking both old and new):
+  //   Old: 18, 19, 20, 21, 36, 22
+  //   New: 78, 79, 80, 81, 82, 22
+  //   Names: Daily Calories, Daily Protein, Daily Carbs, Daily Fat, Daily Sodium, MFP Exercise Calories
 
   $nutrition = [
+    // Core macros (always displayed)
     'calories' => 0,
     'protein_g' => 0,
     'carbs_g' => 0,
     'fat_g' => 0,
+    'sodium_mg' => 0,
     'exercise_cals' => 0,
+    // Additional macros (displayed if > 0)
+    'fiber_g' => 0,
+    'sugar_g' => 0,
+    'saturated_fat_g' => 0,
+    'polyunsaturated_fat_g' => 0,
+    'monounsaturated_fat_g' => 0,
+    'trans_fat_g' => 0,
+    'cholesterol_mg' => 0,
+    'potassium_mg' => 0,
+    // Vitamins & Minerals (displayed if > 0)
+    'vitamin_a_iu' => 0,
+    'vitamin_c_mg' => 0,
+    'calcium_mg' => 0,
+    'iron_mg' => 0,
     'source' => 'measurements',
   ];
 
   // Fetch nutrition measurements from WGER
-  $nutritionCategoryIds = [18, 19, 20, 21, 22]; // Calories, Protein, Carbs, Fat, Exercise
+  // Uses category NAMES to be more robust (finds categories created by CSV import)
+  $nutritionCategoryNames = [
+    'calories' => 'Daily Calories',
+    'protein_g' => 'Daily Protein',
+    'carbs_g' => 'Daily Carbs',
+    'fat_g' => 'Daily Fat',
+    'sodium_mg' => 'Daily Sodium',
+    'exercise_cals' => 'MFP Exercise Calories',
+    'fiber_g' => 'Daily Fiber',
+    'sugar_g' => 'Daily Sugar',
+    'saturated_fat_g' => 'Saturated Fat',
+    'polyunsaturated_fat_g' => 'Polyunsaturated Fat',
+    'monounsaturated_fat_g' => 'Monounsaturated Fat',
+    'trans_fat_g' => 'Trans Fat',
+    'cholesterol_mg' => 'Cholesterol',
+    'potassium_mg' => 'Potassium',
+    'vitamin_a_iu' => 'Vitamin A',
+    'vitamin_c_mg' => 'Vitamin C',
+    'calcium_mg' => 'Calcium',
+    'iron_mg' => 'Iron',
+  ];
 
-  foreach ($nutritionCategoryIds as $categoryId) {
-    try {
-      $measurementResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/measurement/', [
-        'category' => $categoryId,
-        'date' => $date,
-        'limit' => 1,
-      ]);
-
-      $results = $measurementResp['results'] ?? [];
-      if (!empty($results)) {
-        $value = try_number($results[0]['value'] ?? null) ?? 0;
-
-        // Map category ID to nutrition field
-        switch ($categoryId) {
-          case 18: $nutrition['calories'] = $value; break;
-          case 19: $nutrition['protein_g'] = $value; break;
-          case 20: $nutrition['carbs_g'] = $value; break;
-          case 21: $nutrition['fat_g'] = $value; break;
-          case 22: $nutrition['exercise_cals'] = $value; break;
-        }
+  // Get all categories once (handles duplicate names by storing all IDs)
+  try {
+    $categoriesResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/measurement-category/', ['limit' => 200]);
+    $categoryNameToIds = [];
+    foreach ($categoriesResp['results'] ?? [] as $cat) {
+      $name = $cat['name'];
+      if (!isset($categoryNameToIds[$name])) {
+        $categoryNameToIds[$name] = [];
       }
-    } catch (Throwable $e) {
-      // Continue on error
+      $categoryNameToIds[$name][] = $cat['id'];
+    }
+  } catch (Throwable $e) {
+    $categoryNameToIds = [];
+  }
+
+  // Fetch each nutrition field by name (tries all matching category IDs)
+  foreach ($nutritionCategoryNames as $field => $categoryName) {
+    $categoryIds = $categoryNameToIds[$categoryName] ?? [];
+    if (empty($categoryIds)) continue;
+
+    // Try each category ID until we find data
+    foreach ($categoryIds as $categoryId) {
+      try {
+        $measurementResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/measurement/', [
+          'category' => $categoryId,
+          'date' => $date,
+          'limit' => 1,
+        ]);
+
+        $results = $measurementResp['results'] ?? [];
+        if (!empty($results)) {
+          $value = try_number($results[0]['value'] ?? null) ?? 0;
+          if ($value > 0) {
+            $nutrition[$field] = $value;
+            break; // Found data, stop checking other category IDs
+          }
+        }
+      } catch (Throwable $e) {
+        // Continue on error
+      }
     }
   }
 
@@ -333,6 +397,22 @@ try {
           $unit = 'steps';
         }
 
+        // Convert metric to imperial units for American users
+        if ($catName === 'Bone Mass' && $unit === 'kg') {
+          $value = $value * 2.20462;
+          $unit = 'lbs';
+        }
+
+        if ($catName === 'Muscle Mass' && $unit === 'kg') {
+          $value = $value * 2.20462;
+          $unit = 'lbs';
+        }
+
+        if ($catName === 'Distance' && $unit === 'km') {
+          $value = $value * 0.621371;
+          $unit = 'mi';
+        }
+
         $measurementData['categories'][$catName] = [
           'value' => $value,
           'unit' => $unit,
@@ -364,7 +444,7 @@ try {
   // ---------------------------------------------------------------------------
   // SMART FALLBACK: If no nutrition data for requested date, use most recent
   // ---------------------------------------------------------------------------
-  if ($requestedDate === gmdate('Y-m-d') && $data['nutrition']['calories'] === 0) {
+  if ($requestedDate === date('Y-m-d') && $data['nutrition']['calories'] === 0) {
     // No data for today, look backwards for most recent date with data
     $measurementResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/measurement/', [
       'category' => 18, // Daily Calories category
@@ -424,6 +504,22 @@ try {
               $unit = 'steps';
             }
 
+            // Convert metric to imperial units for American users
+            if ($catName === 'Bone Mass' && $unit === 'kg') {
+              $value = $value * 2.20462;
+              $unit = 'lbs';
+            }
+
+            if ($catName === 'Muscle Mass' && $unit === 'kg') {
+              $value = $value * 2.20462;
+              $unit = 'lbs';
+            }
+
+            if ($catName === 'Distance' && $unit === 'km') {
+              $value = $value * 0.621371;
+              $unit = 'mi';
+            }
+
             $measurementData['categories'][$catName] = [
               'value' => $value,
               'unit' => $unit,
@@ -471,7 +567,8 @@ try {
 
   // Extract activity data from measurements
   $steps = $data['measurements']['categories']['Steps']['value'] ?? 0;
-  $distance_km = $data['measurements']['categories']['Distance']['value'] ?? 0;
+  $distance_mi = $data['measurements']['categories']['Distance']['value'] ?? 0;
+  $distance_km = round($distance_mi * 1.60934, 2); // Convert miles to km
   $active_device_kcal = $data['measurements']['categories']['Calories']['value'] ?? 0;
 
   // Extract body composition data from WGER measurements
@@ -674,6 +771,9 @@ try {
     // - Sleep Heart Rate (bpm)
     // - Sleep HRV (ms)
     // - Sleep Respiratory Rate (brpm)
+    // - Sleep Restful (hours)
+    // - Sleep Restless (hours)
+    // - Sleep Out of Bed (hours)
 
     // Find category IDs for sleep metrics
     $sleep_categories = [];
@@ -690,6 +790,9 @@ try {
       $sleep_hr = null;
       $sleep_hrv = null;
       $sleep_rr = null;
+      $sleep_restful = null;
+      $sleep_restless = null;
+      $sleep_out_of_bed = null;
 
       // Fetch each sleep metric
       foreach ($sleep_categories as $name => $cat_id) {
@@ -711,6 +814,12 @@ try {
             $sleep_hrv = round($value, 1);
           } elseif (strpos($name, 'Respiratory') !== false) {
             $sleep_rr = round($value, 1);
+          } elseif (strpos($name, 'Restful') !== false) {
+            $sleep_restful = round($value, 2);
+          } elseif (strpos($name, 'Restless') !== false) {
+            $sleep_restless = round($value, 2);
+          } elseif (strpos($name, 'Out of Bed') !== false) {
+            $sleep_out_of_bed = round($value, 2);
           }
         }
       }
@@ -721,6 +830,9 @@ try {
         'avg_heart_rate_bpm' => $sleep_hr,
         'avg_hrv_ms' => $sleep_hrv,
         'avg_respiratory_rate_brpm' => $sleep_rr,
+        'restful_hours' => $sleep_restful,
+        'restless_hours' => $sleep_restless,
+        'out_of_bed_hours' => $sleep_out_of_bed,
       ];
     }
   } catch (Throwable $e) {
@@ -745,10 +857,13 @@ try {
 
     echo "## Weight\n";
     echo "- **Current Weight:** " . ($data['weight']['current_lb'] ?? 'N/A') . " lbs\n";
+    if (isset($data['weight']['starting_weight_lb'], $data['weight']['starting_date'])) {
+      echo "- **Starting Weight:** " . $data['weight']['starting_weight_lb'] . " lbs (on {$data['weight']['starting_date']})\n";
+    }
     echo "- **7-day Average:** " . (isset($data['weight']['trend_7d_lb']) ? round($data['weight']['trend_7d_lb'], 1) : 'N/A') . " lbs\n";
     echo "- **30-day Average:** " . (isset($data['weight']['trend_30d_lb']) ? round($data['weight']['trend_30d_lb'], 1) : 'N/A') . " lbs\n";
     if (isset($data['weight']['total_change_lb'])) {
-      echo "- **Total Change:** " . ($data['weight']['total_change_lb'] > 0 ? '+' : '') . $data['weight']['total_change_lb'] . " lbs (since {$data['weight']['earliest_date']})\n";
+      echo "- **Total Change:** " . ($data['weight']['total_change_lb'] > 0 ? '+' : '') . $data['weight']['total_change_lb'] . " lbs (from starting weight)\n";
     }
     echo "\n";
 
@@ -767,13 +882,50 @@ try {
     if (isset($data['nutrition']['fat_g']) && $data['nutrition']['fat_g'] !== null) {
         echo "- **Fat:** " . round($data['nutrition']['fat_g'], 1) . " g\n";
     }
-    if (isset($data['nutrition']['fiber_g']) && $data['nutrition']['fiber_g'] !== null) {
+    if (isset($data['nutrition']['sodium_mg']) && $data['nutrition']['sodium_mg'] > 0) {
+        echo "- **Sodium:** " . round($data['nutrition']['sodium_mg']) . " mg\n";
+    }
+    if (($data['nutrition']['fiber_g'] ?? 0) > 0) {
         echo "- **Fiber:** " . round($data['nutrition']['fiber_g'], 1) . " g\n";
+    }
+    if (($data['nutrition']['sugar_g'] ?? 0) > 0) {
+        echo "- **Sugar:** " . round($data['nutrition']['sugar_g'], 1) . " g\n";
+    }
+    if (($data['nutrition']['cholesterol_mg'] ?? 0) > 0) {
+        echo "- **Cholesterol:** " . round($data['nutrition']['cholesterol_mg']) . " mg\n";
+    }
+    if (($data['nutrition']['potassium_mg'] ?? 0) > 0) {
+        echo "- **Potassium:** " . round($data['nutrition']['potassium_mg']) . " mg\n";
+    }
+    if (($data['nutrition']['vitamin_a_iu'] ?? 0) > 0) {
+        echo "- **Vitamin A:** " . round($data['nutrition']['vitamin_a_iu']) . " IU\n";
+    }
+    if (($data['nutrition']['vitamin_c_mg'] ?? 0) > 0) {
+        echo "- **Vitamin C:** " . round($data['nutrition']['vitamin_c_mg']) . " mg\n";
+    }
+    if (($data['nutrition']['calcium_mg'] ?? 0) > 0) {
+        echo "- **Calcium:** " . round($data['nutrition']['calcium_mg']) . " mg\n";
+    }
+    if (($data['nutrition']['iron_mg'] ?? 0) > 0) {
+        echo "- **Iron:** " . round($data['nutrition']['iron_mg'], 1) . " mg\n";
     }
     if (isset($data['nutrition']['entries_count'])) {
         echo "- **Entries:** {$data['nutrition']['entries_count']}\n";
     }
     echo "\n";
+
+    if (!empty($data['sleep'])) {
+      echo "## Sleep\n";
+      if ($data['sleep']['duration_hours']) echo "- **Duration:** {$data['sleep']['duration_hours']} hours\n";
+      if ($data['sleep']['sleep_score']) echo "- **Sleep Score:** {$data['sleep']['sleep_score']}\n";
+      if ($data['sleep']['restful_hours']) echo "- **Restful:** {$data['sleep']['restful_hours']} hours\n";
+      if ($data['sleep']['restless_hours']) echo "- **Restless:** {$data['sleep']['restless_hours']} hours\n";
+      if ($data['sleep']['out_of_bed_hours']) echo "- **Out of Bed:** {$data['sleep']['out_of_bed_hours']} hours\n";
+      if ($data['sleep']['avg_heart_rate_bpm']) echo "- **Avg Heart Rate:** {$data['sleep']['avg_heart_rate_bpm']} bpm\n";
+      if ($data['sleep']['avg_hrv_ms']) echo "- **Avg HRV:** {$data['sleep']['avg_hrv_ms']} ms\n";
+      if ($data['sleep']['avg_respiratory_rate_brpm']) echo "- **Avg Resp Rate:** {$data['sleep']['avg_respiratory_rate_brpm']} brpm\n";
+      echo "\n";
+    }
 
     if (!empty($data['measurements']['categories'])) {
       echo "## Measurements\n";
@@ -797,6 +949,368 @@ try {
       echo "\n";
     }
 
+  } elseif ($format === 'html') {
+    // Matrix-themed HTML format
+    header('Content-Type: text/html; charset=utf-8');
+?>
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Superman Health Matrix - <?php echo $data['date']; ?></title>
+  <link rel="icon" type="image/svg+xml" href="favicon.svg">
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+
+    body {
+      background: #000;
+      color: #00FF41;
+      font-family: 'Courier New', Courier, monospace;
+      padding: 20px;
+      line-height: 1.6;
+      overflow-x: hidden;
+    }
+
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+      animation: fadeIn 0.5s ease-in;
+    }
+
+    @keyframes fadeIn {
+      from { opacity: 0; transform: translateY(-10px); }
+      to { opacity: 1; transform: translateY(0); }
+    }
+
+    h1 {
+      color: #00FF41;
+      text-align: center;
+      font-size: 2em;
+      margin-bottom: 20px;
+      text-shadow: 0 0 10px #00FF41;
+      letter-spacing: 2px;
+      border-bottom: 2px solid #00FF41;
+      padding-bottom: 10px;
+    }
+
+    .header {
+      text-align: center;
+      margin-bottom: 30px;
+      opacity: 0.8;
+    }
+
+    .section {
+      margin-bottom: 30px;
+      border: 1px solid #00FF41;
+      padding: 20px;
+      background: rgba(0, 255, 65, 0.05);
+      border-radius: 5px;
+      box-shadow: 0 0 20px rgba(0, 255, 65, 0.2);
+    }
+
+    .section h2 {
+      color: #00FF41;
+      font-size: 1.5em;
+      margin-bottom: 15px;
+      text-shadow: 0 0 8px #00FF41;
+      border-bottom: 1px solid rgba(0, 255, 65, 0.5);
+      padding-bottom: 5px;
+    }
+
+    .data-row {
+      display: flex;
+      justify-content: space-between;
+      padding: 8px 0;
+      border-bottom: 1px solid rgba(0, 255, 65, 0.2);
+    }
+
+    .data-row:last-child {
+      border-bottom: none;
+    }
+
+    .label {
+      color: #00DD33;
+      font-weight: bold;
+    }
+
+    .value {
+      color: #00FF41;
+      text-align: right;
+    }
+
+    .highlight {
+      color: #00FF00;
+      font-weight: bold;
+      text-shadow: 0 0 5px #00FF00;
+    }
+
+    .grid {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(300px, 1fr));
+      gap: 20px;
+    }
+
+    @media (max-width: 768px) {
+      body {
+        padding: 10px;
+      }
+
+      h1 {
+        font-size: 1.5em;
+      }
+
+      .section {
+        padding: 15px;
+      }
+    }
+
+    .blink {
+      animation: blink 1.5s ease-in-out infinite;
+    }
+
+    @keyframes blink {
+      0%, 100% { opacity: 1; }
+      50% { opacity: 0.3; }
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>▌█ SUPERMAN HEALTH MATRIX █▐</h1>
+
+    <div class="header">
+      <div>DATE: <span class="highlight"><?php echo $data['date']; ?></span></div>
+      <div>GENERATED: <?php echo $data['generated_at']; ?></div>
+      <?php if (!empty($data['using_most_recent'])): ?>
+        <div style="color: #FFFF00;">⚠ SHOWING MOST RECENT DATA (requested <?php echo $data['requested_date']; ?> had none)</div>
+      <?php endif; ?>
+    </div>
+
+    <div class="grid">
+      <!-- WEIGHT SECTION -->
+      <div class="section">
+        <h2>▌WEIGHT DATA</h2>
+        <div class="data-row">
+          <span class="label">CURRENT:</span>
+          <span class="value highlight"><?php echo $data['weight']['current_lb'] ?? 'N/A'; ?> lbs</span>
+        </div>
+        <div class="data-row">
+          <span class="label">AS OF:</span>
+          <span class="value"><?php echo $data['weight']['date_of_reading'] ?? 'N/A'; ?></span>
+        </div>
+        <?php if (isset($data['weight']['starting_weight_lb'])): ?>
+        <div class="data-row">
+          <span class="label">STARTING:</span>
+          <span class="value"><?php echo $data['weight']['starting_weight_lb']; ?> lbs (<?php echo $data['weight']['starting_date']; ?>)</span>
+        </div>
+        <?php endif; ?>
+        <div class="data-row">
+          <span class="label">7-DAY TREND:</span>
+          <span class="value"><?php echo isset($data['weight']['trend_7d_lb']) ? round($data['weight']['trend_7d_lb'], 1) : 'N/A'; ?> lbs</span>
+        </div>
+        <div class="data-row">
+          <span class="label">30-DAY TREND:</span>
+          <span class="value"><?php echo isset($data['weight']['trend_30d_lb']) ? round($data['weight']['trend_30d_lb'], 1) : 'N/A'; ?> lbs</span>
+        </div>
+        <div class="data-row">
+          <span class="label">90-DAY TREND:</span>
+          <span class="value"><?php echo isset($data['weight']['trend_90d_lb']) ? round($data['weight']['trend_90d_lb'], 1) : 'N/A'; ?> lbs</span>
+        </div>
+        <?php if (isset($data['weight']['total_change_lb'])): ?>
+        <div class="data-row">
+          <span class="label">TOTAL CHANGE:</span>
+          <span class="value highlight"><?php echo ($data['weight']['total_change_lb'] > 0 ? '+' : '') . $data['weight']['total_change_lb']; ?> lbs</span>
+        </div>
+        <?php endif; ?>
+      </div>
+
+      <!-- NUTRITION SECTION -->
+      <div class="section">
+        <h2>▌NUTRITION DATA</h2>
+        <div class="data-row">
+          <span class="label">CALORIES:</span>
+          <span class="value highlight"><?php echo round($data['nutrition']['calories']); ?> / <?php echo $data['nutrition']['goal_calories'] ?? 'N/A'; ?> kcal</span>
+        </div>
+        <?php if ($data['nutrition']['exercise_cals'] > 0): ?>
+        <div class="data-row">
+          <span class="label">EXERCISE BURNED:</span>
+          <span class="value"><?php echo round($data['nutrition']['exercise_cals']); ?> kcal</span>
+        </div>
+        <?php endif; ?>
+        <?php if ($data['nutrition']['remaining_calories'] !== null): ?>
+        <div class="data-row">
+          <span class="label">REMAINING:</span>
+          <span class="value"><?php echo round($data['nutrition']['remaining_calories']); ?> kcal</span>
+        </div>
+        <?php endif; ?>
+        <div class="data-row">
+          <span class="label">PROTEIN:</span>
+          <span class="value"><?php echo round($data['nutrition']['protein_g'], 1); ?> g</span>
+        </div>
+        <div class="data-row">
+          <span class="label">CARBS:</span>
+          <span class="value"><?php echo round($data['nutrition']['carbs_g'], 1); ?> g</span>
+        </div>
+        <div class="data-row">
+          <span class="label">FAT:</span>
+          <span class="value"><?php echo round($data['nutrition']['fat_g'], 1); ?> g</span>
+        </div>
+        <?php if (isset($data['nutrition']['sodium_mg']) && $data['nutrition']['sodium_mg'] > 0): ?>
+        <div class="data-row">
+          <span class="label">SODIUM:</span>
+          <span class="value"><?php echo round($data['nutrition']['sodium_mg']); ?> mg</span>
+        </div>
+        <?php endif; ?>
+
+        <?php if (($data['nutrition']['fiber_g'] ?? 0) > 0): ?>
+        <div class="data-row">
+          <span class="label">FIBER:</span>
+          <span class="value"><?php echo round($data['nutrition']['fiber_g'], 1); ?> g</span>
+        </div>
+        <?php endif; ?>
+
+        <?php if (($data['nutrition']['sugar_g'] ?? 0) > 0): ?>
+        <div class="data-row">
+          <span class="label">SUGAR:</span>
+          <span class="value"><?php echo round($data['nutrition']['sugar_g'], 1); ?> g</span>
+        </div>
+        <?php endif; ?>
+
+        <?php if (($data['nutrition']['cholesterol_mg'] ?? 0) > 0): ?>
+        <div class="data-row">
+          <span class="label">CHOLESTEROL:</span>
+          <span class="value"><?php echo round($data['nutrition']['cholesterol_mg']); ?> mg</span>
+        </div>
+        <?php endif; ?>
+
+        <?php if (($data['nutrition']['potassium_mg'] ?? 0) > 0): ?>
+        <div class="data-row">
+          <span class="label">POTASSIUM:</span>
+          <span class="value"><?php echo round($data['nutrition']['potassium_mg']); ?> mg</span>
+        </div>
+        <?php endif; ?>
+      </div>
+    </div>
+
+    <?php if (!empty($data['sleep'])): ?>
+    <!-- SLEEP SECTION -->
+    <div class="section">
+      <h2>▌SLEEP DATA</h2>
+      <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+        <?php if ($data['sleep']['duration_hours']): ?>
+        <div class="data-row">
+          <span class="label">DURATION:</span>
+          <span class="value highlight"><?php echo $data['sleep']['duration_hours']; ?> hours</span>
+        </div>
+        <?php endif; ?>
+        <?php if ($data['sleep']['sleep_score']): ?>
+        <div class="data-row">
+          <span class="label">SLEEP SCORE:</span>
+          <span class="value highlight"><?php echo $data['sleep']['sleep_score']; ?></span>
+        </div>
+        <?php endif; ?>
+        <?php if ($data['sleep']['restful_hours']): ?>
+        <div class="data-row">
+          <span class="label">RESTFUL:</span>
+          <span class="value"><?php echo $data['sleep']['restful_hours']; ?> hours</span>
+        </div>
+        <?php endif; ?>
+        <?php if ($data['sleep']['restless_hours']): ?>
+        <div class="data-row">
+          <span class="label">RESTLESS:</span>
+          <span class="value"><?php echo $data['sleep']['restless_hours']; ?> hours</span>
+        </div>
+        <?php endif; ?>
+        <?php if ($data['sleep']['out_of_bed_hours']): ?>
+        <div class="data-row">
+          <span class="label">OUT OF BED:</span>
+          <span class="value"><?php echo $data['sleep']['out_of_bed_hours']; ?> hours</span>
+        </div>
+        <?php endif; ?>
+        <?php if ($data['sleep']['avg_heart_rate_bpm']): ?>
+        <div class="data-row">
+          <span class="label">AVG HEART RATE:</span>
+          <span class="value"><?php echo $data['sleep']['avg_heart_rate_bpm']; ?> bpm</span>
+        </div>
+        <?php endif; ?>
+        <?php if ($data['sleep']['avg_hrv_ms']): ?>
+        <div class="data-row">
+          <span class="label">AVG HRV:</span>
+          <span class="value"><?php echo $data['sleep']['avg_hrv_ms']; ?> ms</span>
+        </div>
+        <?php endif; ?>
+        <?php if ($data['sleep']['avg_respiratory_rate_brpm']): ?>
+        <div class="data-row">
+          <span class="label">AVG RESP RATE:</span>
+          <span class="value"><?php echo $data['sleep']['avg_respiratory_rate_brpm']; ?> brpm</span>
+        </div>
+        <?php endif; ?>
+      </div>
+    </div>
+    <?php endif; ?>
+
+    <?php if (!empty($data['measurements']['categories'])): ?>
+    <!-- MEASUREMENTS SECTION -->
+    <div class="section">
+      <h2>▌BODY MEASUREMENTS</h2>
+      <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+        <?php foreach ($data['measurements']['categories'] as $name => $info): ?>
+        <div class="data-row">
+          <span class="label"><?php echo strtoupper($name); ?>:</span>
+          <span class="value"><?php echo $info['value']; ?> <?php echo $info['unit'] ?? ''; ?></span>
+        </div>
+        <?php endforeach; ?>
+      </div>
+    </div>
+    <?php endif; ?>
+
+    <?php if (isset($data['workouts']['sessions_today']) && $data['workouts']['sessions_today'] > 0): ?>
+    <!-- WORKOUTS SECTION -->
+    <div class="section">
+      <h2>▌WORKOUT DATA</h2>
+      <div class="data-row">
+        <span class="label">SESSIONS TODAY:</span>
+        <span class="value highlight"><?php echo $data['workouts']['sessions_today']; ?></span>
+      </div>
+      <?php foreach ($data['workouts']['sessions'] as $i => $session): ?>
+        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(0, 255, 65, 0.3);">
+          <div class="highlight">SESSION <?php echo $i + 1; ?></div>
+          <?php if (isset($session['workout_name'])): ?>
+          <div class="data-row">
+            <span class="label">WORKOUT:</span>
+            <span class="value"><?php echo $session['workout_name']; ?></span>
+          </div>
+          <?php endif; ?>
+          <?php if (isset($session['time'])): ?>
+          <div class="data-row">
+            <span class="label">TIME:</span>
+            <span class="value"><?php echo $session['time']; ?></span>
+          </div>
+          <?php endif; ?>
+          <?php if (isset($session['notes']) && $session['notes']): ?>
+          <div class="data-row">
+            <span class="label">NOTES:</span>
+            <span class="value"><?php echo $session['notes']; ?></span>
+          </div>
+          <?php endif; ?>
+        </div>
+      <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
+
+    <div style="text-align: center; margin-top: 40px; opacity: 0.6;">
+      <span class="blink">▌</span> END TRANSMISSION <span class="blink">▐</span>
+    </div>
+  </div>
+</body>
+</html>
+<?php
+
   } else {
     // Plain text (ChatGPT-friendly format)
     echo "=== WGER HEALTH DATA ===\n";
@@ -808,11 +1322,14 @@ try {
 
     echo "--- WEIGHT ---\n";
     echo "Current: " . ($data['weight']['current_lb'] ?? 'N/A') . " lbs (as of {$data['weight']['date_of_reading']})\n";
+    if (isset($data['weight']['starting_weight_lb'], $data['weight']['starting_date'])) {
+      echo "Starting: " . $data['weight']['starting_weight_lb'] . " lbs (on {$data['weight']['starting_date']})\n";
+    }
     echo "7-day trend: " . (isset($data['weight']['trend_7d_lb']) ? round($data['weight']['trend_7d_lb'], 1) : 'N/A') . " lbs\n";
     echo "30-day trend: " . (isset($data['weight']['trend_30d_lb']) ? round($data['weight']['trend_30d_lb'], 1) : 'N/A') . " lbs\n";
     echo "90-day trend: " . (isset($data['weight']['trend_90d_lb']) ? round($data['weight']['trend_90d_lb'], 1) : 'N/A') . " lbs\n";
     if (isset($data['weight']['total_change_lb'])) {
-      echo "Total change: " . ($data['weight']['total_change_lb'] > 0 ? '+' : '') . $data['weight']['total_change_lb'] . " lbs\n";
+      echo "Total change: " . ($data['weight']['total_change_lb'] > 0 ? '+' : '') . $data['weight']['total_change_lb'] . " lbs (from starting weight)\n";
     }
     echo "\n";
 
@@ -827,7 +1344,56 @@ try {
     echo "Protein: " . round($data['nutrition']['protein_g'], 1) . " g\n";
     echo "Carbs: " . round($data['nutrition']['carbs_g'], 1) . " g\n";
     echo "Fat: " . round($data['nutrition']['fat_g'], 1) . " g\n";
+    if (isset($data['nutrition']['sodium_mg']) && $data['nutrition']['sodium_mg'] > 0) {
+      echo "Sodium: " . round($data['nutrition']['sodium_mg']) . " mg\n";
+    }
+
+    // Additional nutrition details (only if > 0)
+    if (($data['nutrition']['fiber_g'] ?? 0) > 0) {
+      echo "Fiber: " . round($data['nutrition']['fiber_g'], 1) . " g\n";
+    }
+    if (($data['nutrition']['sugar_g'] ?? 0) > 0) {
+      echo "Sugar: " . round($data['nutrition']['sugar_g'], 1) . " g\n";
+    }
+    if (($data['nutrition']['cholesterol_mg'] ?? 0) > 0) {
+      echo "Cholesterol: " . round($data['nutrition']['cholesterol_mg']) . " mg\n";
+    }
+    if (($data['nutrition']['potassium_mg'] ?? 0) > 0) {
+      echo "Potassium: " . round($data['nutrition']['potassium_mg']) . " mg\n";
+    }
+    if (($data['nutrition']['saturated_fat_g'] ?? 0) > 0) {
+      echo "Saturated Fat: " . round($data['nutrition']['saturated_fat_g'], 1) . " g\n";
+    }
+    if (($data['nutrition']['trans_fat_g'] ?? 0) > 0) {
+      echo "Trans Fat: " . round($data['nutrition']['trans_fat_g'], 1) . " g\n";
+    }
+    if (($data['nutrition']['vitamin_a_iu'] ?? 0) > 0) {
+      echo "Vitamin A: " . round($data['nutrition']['vitamin_a_iu']) . " IU\n";
+    }
+    if (($data['nutrition']['vitamin_c_mg'] ?? 0) > 0) {
+      echo "Vitamin C: " . round($data['nutrition']['vitamin_c_mg']) . " mg\n";
+    }
+    if (($data['nutrition']['calcium_mg'] ?? 0) > 0) {
+      echo "Calcium: " . round($data['nutrition']['calcium_mg']) . " mg\n";
+    }
+    if (($data['nutrition']['iron_mg'] ?? 0) > 0) {
+      echo "Iron: " . round($data['nutrition']['iron_mg'], 1) . " mg\n";
+    }
+
     echo "\n";
+
+    if (!empty($data['sleep'])) {
+      echo "--- SLEEP ---\n";
+      if ($data['sleep']['duration_hours']) echo "Duration: {$data['sleep']['duration_hours']} hours\n";
+      if ($data['sleep']['sleep_score']) echo "Sleep Score: {$data['sleep']['sleep_score']}\n";
+      if ($data['sleep']['restful_hours']) echo "Restful: {$data['sleep']['restful_hours']} hours\n";
+      if ($data['sleep']['restless_hours']) echo "Restless: {$data['sleep']['restless_hours']} hours\n";
+      if ($data['sleep']['out_of_bed_hours']) echo "Out of Bed: {$data['sleep']['out_of_bed_hours']} hours\n";
+      if ($data['sleep']['avg_heart_rate_bpm']) echo "Avg Heart Rate: {$data['sleep']['avg_heart_rate_bpm']} bpm\n";
+      if ($data['sleep']['avg_hrv_ms']) echo "Avg HRV: {$data['sleep']['avg_hrv_ms']} ms\n";
+      if ($data['sleep']['avg_respiratory_rate_brpm']) echo "Avg Resp Rate: {$data['sleep']['avg_respiratory_rate_brpm']} brpm\n";
+      echo "\n";
+    }
 
     if (!empty($data['measurements']['categories'])) {
       echo "--- MEASUREMENTS ---\n";
