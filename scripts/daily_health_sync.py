@@ -42,6 +42,11 @@ OUTPUT:
 """
 
 import os
+try:
+    from dotenv import load_dotenv
+    load_dotenv()
+except ImportError:
+    pass  # dotenv optional; set env vars manually or hardcode below
 import sys
 import re
 import json
@@ -49,7 +54,7 @@ import time
 import requests
 import webbrowser
 from pathlib import Path
-from datetime import datetime
+from datetime import datetime, timedelta
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse, parse_qs
 
@@ -83,8 +88,8 @@ else:
 SLEEPNUMBER_SYNC_ENABLED = SLEEPNUMBER_SYNC and SLEEPNUMBER_AVAILABLE
 
 # Withings OAuth
-WITHINGS_CLIENT_ID = "your_withings_client_id_here"
-WITHINGS_CLIENT_SECRET = "your_withings_client_secret_here"
+WITHINGS_CLIENT_ID     = os.environ.get("WITHINGS_CLIENT_ID",     "your_withings_client_id_here")
+WITHINGS_CLIENT_SECRET = os.environ.get("WITHINGS_CLIENT_SECRET", "your_withings_client_secret_here")
 WITHINGS_TOKEN_FILE = str(Path(__file__).parent / "withings_tokens.json")
 
 # Sleep Number Credentials
@@ -93,8 +98,8 @@ SLEEPNUMBER_PASSWORD = "vjz@kqw!WMF*bpr7ufa"
 SLEEPNUMBER_TOKEN_FILE = str(Path(__file__).parent / "sleepnumber_session.json")
 
 # WGER
-WGER_BASE = 'https://your-wger-instance.com'
-WGER_TOKEN = 'your_wger_api_token_here'
+WGER_BASE  = os.environ.get('WGER_BASE_URL',  'https://your-wger-instance.com')
+WGER_TOKEN = os.environ.get('WGER_TOKEN',   'your_wger_api_token_here')
 
 # WGER Measurement Categories (created once)
 CATEGORY_CALORIES = None    # Daily Calories (kcal) - food
@@ -123,8 +128,11 @@ DAILY_CONSTANTS_FILE = SCRIPT_DIR / 'daily_constants.json'
 SLEEP_CACHE_DIR = SCRIPT_DIR / 'sleep_cache'
 SLEEP_CACHE_DIR.mkdir(exist_ok=True)
 
-# Sync window (days back for Withings)
-DAYS_BACK = 7  # Daily sync window
+# Sync window (days back for Withings) - overridden by --backfill=N CLI arg
+DAYS_BACK = 1  # Daily sync window (1 = yesterday + today only)
+
+# Specific date to sync - overridden by --date=YYYY-MM-DD CLI arg (None = use today/yesterday)
+SYNC_DATE = None
 
 # =============================================================================
 # WITHINGS OAUTH & API
@@ -287,7 +295,7 @@ def withings_get_workouts(access_token, start_ymd, end_ymd):
         "access_token": access_token,
         "startdateymd": start_ymd,
         "enddateymd": end_ymd,
-        "data_fields": "steps,distance,duration,calories"
+        # No data_fields filter — fetch all fields including manual_distance
     }
     r = requests.post(url, data=data, timeout=60)
     r.raise_for_status()
@@ -319,6 +327,7 @@ def withings_get_weight(access_token, start_ts, end_ts):
 
 async def sleepnumber_get_sleep_data(email, password):
     """Fetch Sleep Number sleep data from last night"""
+    api = None
     try:
         from datetime import timedelta
 
@@ -366,101 +375,55 @@ async def sleepnumber_get_sleep_data(email, password):
             'tags': [],
         }
 
-        # FETCH SLEEP DATA FROM API (required - not auto-populated!)
-        yesterday = (datetime.now() - timedelta(days=1)).strftime("%Y-%m-%dT%H:%M:%S")
-
-        params = {
-            "date": yesterday,
-            "interval": "D1",
-            "sleeper": sleeper.sleeper_id,
-            "includeSlices": "false"
-        }
-        param_str = "&".join(f"{k}={v}" for k, v in params.items())
-        endpoint = f"sleepData?{param_str}"
-
+        # FETCH SLEEP DATA FROM API using new library method
+        # Note: fetch_sleep_data() gets the most recent sleep session (last night)
         try:
-            data = await api.get(endpoint)
+            # Use the new fetch_sleep_data() method from updated asyncsleepiq library
+            # This method does NOT take a date parameter - it gets the most recent sleep data
+            await sleeper.fetch_sleep_data()
 
-            if data:
-                # Duration (convert seconds to hours)
-                # NOTE: totalSleepSessionTime is always 0, use 'inBed' instead
-                if data.get("inBed", 0) > 0:
-                    sleep_data["duration_hours"] = round(data["inBed"] / 3600, 2)
+            # Extract data from sleeper.sleep_data
+            # Duration (convert seconds to hours; must be > 1 hour to be valid)
+            if sleeper.sleep_data.duration and sleeper.sleep_data.duration > 3600:
+                sleep_data["duration_hours"] = round(sleeper.sleep_data.duration / 3600, 2)
 
-                # Restful sleep time
-                if data.get("restful", 0) > 0:
-                    sleep_data["restful_hours"] = round(data["restful"] / 3600, 2)
+            # Sleep score (aggregate average)
+            if sleeper.sleep_data.sleep_score:
+                sleep_data["sleep_score"] = int(sleeper.sleep_data.sleep_score)
 
-                # Restless sleep time
-                if data.get("restless", 0) > 0:
-                    sleep_data["restless_hours"] = round(data["restless"] / 3600, 2)
+            # Heart rate (aggregate average)
+            if sleeper.sleep_data.heart_rate:
+                sleep_data["avg_heart_rate"] = int(sleeper.sleep_data.heart_rate)
 
-                # Out of bed time
-                if data.get("outOfBed", 0) > 0:
-                    sleep_data["out_of_bed_hours"] = round(data["outOfBed"] / 3600, 2)
+            # HRV (from most recent/longest session)
+            if sleeper.sleep_data.hrv:
+                sleep_data["avg_hrv"] = int(sleeper.sleep_data.hrv)
 
-                # Sleep score
-                if data.get("avgSleepIQ"):
-                    sleep_data["sleep_score"] = int(data["avgSleepIQ"])
+            # Respiratory rate (aggregate average)
+            if sleeper.sleep_data.respiratory_rate:
+                sleep_data["avg_resp_rate"] = int(sleeper.sleep_data.respiratory_rate)
 
-                # Heart rate
-                if data.get("avgHeartRate"):
-                    sleep_data["avg_heart_rate"] = int(data["avgHeartRate"])
-
-                # HRV (if available - not always present)
-                if data.get("avgHeartRateVariability"):
-                    sleep_data["avg_hrv"] = int(data["avgHeartRateVariability"])
-
-                # Respiratory rate
-                if data.get("avgRespirationRate"):
-                    sleep_data["avg_resp_rate"] = int(data["avgRespirationRate"])
-
-                # Sleep message and tip
-                if data.get("message"):
-                    sleep_data["message"] = data["message"]
-                if data.get("tip"):
-                    sleep_data["tip"] = data["tip"]
-
-                # Session details
-                if data.get("sleepData") and len(data["sleepData"]) > 0:
-                    sleep_day = data["sleepData"][0]
-
-                    # Extract sessions
-                    if sleep_day.get("sessions"):
-                        for session in sleep_day["sessions"]:
-                            sleep_data["sessions"].append({
-                                "start": session.get("startDate"),
-                                "end": session.get("endDate"),
-                                "duration_hours": round(session.get("inBed", 0) / 3600, 2) if session.get("inBed") else None,
-                                "sleep_number": session.get("sleepNumber"),
-                                "sleep_score": session.get("sleepQuotient"),
-                                "heart_rate": session.get("avgHeartRate"),
-                                "resp_rate": session.get("avgRespirationRate"),
-                                "restful_hours": round(session.get("restful", 0) / 3600, 2) if session.get("restful") else None,
-                                "restless_hours": round(session.get("restless", 0) / 3600, 2) if session.get("restless") else None,
-                                "is_longest": session.get("longest", False),
-                            })
-
-                    # Extract tags
-                    if sleep_day.get("tags"):
-                        sleep_data["tags"] = sleep_day["tags"]
+            # Note: restful/restless/out_of_bed data not available in new library method
+            # These would require additional API calls to get session details
 
         except Exception as e:
             print(f"   ⚠️  Error fetching sleep data: {e}")
+            import traceback
+            traceback.print_exc()
             # Return empty data rather than None
-
-        # Clean up (method might not exist in all versions)
-        try:
-            if hasattr(api, 'stop_websocket'):
-                await api.stop_websocket()
-        except:
-            pass
 
         return sleep_data
 
     except Exception as e:
         print(f"   ⚠️  Sleep Number API error: {e}")
         return None
+
+    finally:
+        # Always close the aiohttp session to avoid "Unclosed client session" warnings
+        try:
+            await api.close_session()
+        except:
+            pass
 
 def save_sleep_to_cache(date, sleep_data, sleeper_name="John"):
     """Save sleep data to local cache"""
@@ -493,30 +456,22 @@ def sync_sleepnumber():
         return True
 
     try:
-        # Use yesterday's date (last night's sleep)
+        # Sleep data is stored for the night before the given date
+        # If --date=YYYY-MM-DD is set, use that date; otherwise default to yesterday
         from datetime import timedelta
-        yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
-
-        # Check if already cached
-        cache_file = SLEEP_CACHE_DIR / f"{yesterday}.json"
-        if cache_file.exists():
-            print(f"📂 Found cached sleep data for {yesterday}")
-            print(f"   Loading from cache...")
-            with open(cache_file, 'r') as f:
-                cached = json.load(f)
-            sleep_data = cached.get('data', {})
+        if SYNC_DATE:
+            yesterday = SYNC_DATE
         else:
-            # Fetch from Sleep Number API
-            print(f"🌐 Fetching sleep data from Sleep Number...")
-            sleep_data = asyncio.run(sleepnumber_get_sleep_data(SLEEPNUMBER_EMAIL, SLEEPNUMBER_PASSWORD))
+            yesterday = (datetime.now() - timedelta(days=1)).strftime('%Y-%m-%d')
 
-            if not sleep_data:
-                print("⚠️  No sleep data available (might not have slept yet)")
-                return True
+        # ALWAYS fetch fresh data from Sleep Number API (never use cache for live syncs)
+        # Cache is only used during backfill operations
+        print(f"🌐 Fetching fresh sleep data from Sleep Number...")
+        sleep_data = asyncio.run(sleepnumber_get_sleep_data(SLEEPNUMBER_EMAIL, SLEEPNUMBER_PASSWORD))
 
-            # Cache the data BEFORE posting to WGER
-            save_sleep_to_cache(yesterday, sleep_data)
-            print(f"   ✅ Sleep data cached locally")
+        if not sleep_data:
+            print("⚠️  No sleep data available (might not have slept yet)")
+            return True
 
         # Get or create categories
         global CATEGORY_SLEEP_DURATION, CATEGORY_SLEEP_SCORE, CATEGORY_SLEEP_HR
@@ -536,35 +491,35 @@ def sync_sleepnumber():
         print(f"\n📤 Posting to WGER...")
         success_count = 0
 
-        if sleep_data['duration_hours']:
+        if sleep_data.get('duration_hours'):
             success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_DURATION,
                                                    sleep_data['duration_hours'], "Sleep Number")
             if success:
                 print(f"   ✅ Sleep duration: {sleep_data['duration_hours']} hours ({action})")
                 success_count += 1
 
-        if sleep_data['sleep_score']:
+        if sleep_data.get('sleep_score'):
             success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_SCORE,
                                                    sleep_data['sleep_score'], "Sleep Number")
             if success:
                 print(f"   ✅ SleepIQ score: {sleep_data['sleep_score']} ({action})")
                 success_count += 1
 
-        if sleep_data['avg_heart_rate']:
+        if sleep_data.get('avg_heart_rate'):
             success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_HR,
                                                    sleep_data['avg_heart_rate'], "Sleep Number")
             if success:
                 print(f"   ✅ Avg heart rate: {sleep_data['avg_heart_rate']} bpm ({action})")
                 success_count += 1
 
-        if sleep_data['avg_hrv']:
+        if sleep_data.get('avg_hrv'):
             success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_HRV,
                                                    sleep_data['avg_hrv'], "Sleep Number")
             if success:
                 print(f"   ✅ Avg HRV: {sleep_data['avg_hrv']} ms ({action})")
                 success_count += 1
 
-        if sleep_data['avg_resp_rate']:
+        if sleep_data.get('avg_resp_rate'):
             success, action = wger_post_measurement(yesterday, CATEGORY_SLEEP_RR,
                                                    sleep_data['avg_resp_rate'], "Sleep Number")
             if success:
@@ -754,7 +709,7 @@ def parse_mfp_screenshot(image_path):
     text = pytesseract.image_to_string(img)
 
     nutrition = {
-        'date': datetime.now().strftime('%Y-%m-%d'),
+        'date': SYNC_DATE or datetime.now().strftime('%Y-%m-%d'),
         'calories': 0,
         'protein_g': 0,
         'carbs_g': 0,
@@ -826,7 +781,7 @@ def manual_nutrition_entry():
         sodium = input("Sodium (mg) [Enter to skip]: ")
 
         return {
-            'date': datetime.now().strftime('%Y-%m-%d'),
+            'date': SYNC_DATE or datetime.now().strftime('%Y-%m-%d'),
             'calories': calories,
             'exercise_cals': int(exercise) if exercise else 0,
             'protein_g': int(protein) if protein else 0,
@@ -922,10 +877,12 @@ def sync_withings():
         workouts_data = withings_get_workouts(access_token, start_ymd, end_ymd)
 
         # Build map of date -> workout distance (in meters)
+        # Use 'distance' (GPS) if available, fall back to 'manual_distance' (manually entered in app)
         workout_distances = {}
         for workout in workouts_data.get('series', []):
             workout_date = workout.get('date')
-            workout_dist = workout.get('data', {}).get('distance')
+            data = workout.get('data', {})
+            workout_dist = data.get('manual_distance') or data.get('distance')
             if workout_date and workout_dist:
                 # Sum up all workouts for the day
                 workout_distances[workout_date] = workout_distances.get(workout_date, 0) + workout_dist
@@ -953,18 +910,13 @@ def sync_withings():
                 if success:
                     activity_count += 1
 
-            # Use workout distance if available (more accurate), otherwise use activity distance
+            # Only store distance from explicit workouts (Withings app exercise sessions)
+            # Activity distance includes all-day passive movement and doesn't match Withings app display
             distance_meters = None
-            source = "activity"
+            source = "workout"
 
             if date in workout_distances:
-                # Prefer workout distance (accurate from actual workouts)
                 distance_meters = workout_distances[date]
-                source = "workout"
-            elif "distance" in day and day["distance"] is not None and day["distance"] > 0:
-                # Fallback to activity distance (may include passive movement)
-                distance_meters = day["distance"]
-                source = "activity"
 
             if distance_meters:
                 # Convert meters to km and round to 2 decimals
@@ -1005,6 +957,10 @@ def sync_withings():
         cat_bmr = wger_get_or_create_category("Basal Metabolic Rate", "kcal")
         cat_metabolic_age = wger_get_or_create_category("Metabolic Age", "years")
 
+        # Track dates already posted to avoid overwriting with older readings
+        # Withings returns groups newest-first, so first weight per date wins
+        weight_posted_dates = set()
+
         for grp in weight_data.get("measuregrps", []):
             ts = int(grp.get("date", 0))
             if not ts:
@@ -1025,8 +981,8 @@ def sync_withings():
 
                 value = float(raw) * (10 ** int(expo))
 
-                # Type 1: Weight
-                if mtype == 1 and not weight_posted:
+                # Type 1: Weight (only post the most recent reading per date)
+                if mtype == 1 and not weight_posted and date not in weight_posted_dates:
                     weight_lb = value * 2.20462
                     if 30 <= weight_lb <= 350:
                         success, action = wger_post_weight(date, weight_lb)
@@ -1034,6 +990,10 @@ def sync_withings():
                         if success:
                             weight_count += 1
                             weight_posted = True
+                            weight_posted_dates.add(date)
+                elif mtype == 1 and date in weight_posted_dates:
+                    weight_lb = value * 2.20462
+                    print(f"   ⏭️  {date}: {weight_lb:.2f} lbs (skipped older reading)")
 
                 # Type 6: Body Fat %
                 elif mtype == 6:
@@ -1051,9 +1011,10 @@ def sync_withings():
 
                 # Type 77: Hydration (convert to %)
                 elif mtype == 77:
-                    # Hydration comes as kg of water, convert to %
+                    # Hydration comes as kg of water; need body weight in kg to get %
                     if weight_posted and value > 0:
-                        hydration_pct = (value / (value / 2.20462)) * 100  # rough estimate
+                        body_weight_kg = weight_lb / 2.20462
+                        hydration_pct = (value / body_weight_kg) * 100
                         success, action = wger_post_measurement(date, cat_hydration, round(hydration_pct, 1), "Withings")
                         if success:
                             print(f"   ✅ {date}: {hydration_pct:.1f}% hydration ({action})")
@@ -1107,8 +1068,7 @@ def save_digestion_log(log_data):
     else:
         log = {}
 
-    # Add today's entry
-    date = datetime.now().strftime('%Y-%m-%d')
+    date = SYNC_DATE or datetime.now().strftime('%Y-%m-%d')
     log[date] = log_data
 
     # Save
@@ -1241,19 +1201,57 @@ def sync_mfp_nutrition(arg):
 def main():
     banner()
 
-    # Check arguments
-    if len(sys.argv) < 2:
-        print("Usage:")
-        print("  daily_health_sync.py screenshot.png    # OCR mode")
-        print("  daily_health_sync.py manual            # Manual entry")
-        print()
-        print("This script will:")
-        print("  1. Sync Withings data (steps, calories, weight)")
-        print("  2. Parse MFP nutrition from screenshot or manual entry")
-        print("  3. Post everything to WGER")
-        sys.exit(1)
+    # Check arguments and parse flags
+    global DAYS_BACK, SYNC_DATE
 
-    arg = sys.argv[1]
+    args = sys.argv[1:]
+    backfill_days = None
+    positional = []
+
+    for a in args:
+        if a.startswith('--backfill='):
+            try:
+                backfill_days = int(a.split('=', 1)[1])
+            except ValueError:
+                print(f"❌ Invalid --backfill value: {a}")
+                sys.exit(1)
+        elif a.startswith('--date='):
+            raw = a.split('=', 1)[1]
+            try:
+                datetime.strptime(raw, '%Y-%m-%d')
+                SYNC_DATE = raw
+            except ValueError:
+                print(f"❌ Invalid --date value: {raw} (use YYYY-MM-DD)")
+                sys.exit(1)
+        else:
+            positional.append(a)
+
+    # Default to manual if no positional arg given
+    arg = positional[0] if positional else 'manual'
+
+    # Always ask for date interactively if not provided via --date flag
+    if not SYNC_DATE and not backfill_days:
+        today = datetime.now().strftime('%Y-%m-%d')
+        raw = input(f"📅 Date to sync [{today}]: ").strip()
+        if raw:
+            try:
+                datetime.strptime(raw, '%Y-%m-%d')
+                SYNC_DATE = raw
+            except ValueError:
+                print(f"❌ Invalid date: {raw} (use YYYY-MM-DD)")
+                sys.exit(1)
+        else:
+            SYNC_DATE = today
+        print(f"   Syncing: {SYNC_DATE}")
+
+    if SYNC_DATE:
+        # Calculate how many days back the target date is so Withings fetch covers it
+        days_diff = (datetime.now() - datetime.strptime(SYNC_DATE, '%Y-%m-%d')).days
+        DAYS_BACK = max(days_diff + 1, 1)
+        print(f"📅 Date mode: syncing {SYNC_DATE} (DAYS_BACK={DAYS_BACK})")
+    elif backfill_days is not None:
+        DAYS_BACK = backfill_days
+        print(f"📅 Backfill mode: syncing last {DAYS_BACK} days")
 
     # Step 1: Sync Sleep Number (last night's data)
     sleepnumber_ok = sync_sleepnumber()
@@ -1276,7 +1274,7 @@ def main():
 
     if withings_ok and nutrition_ok:
         print("\n🎉 ALL DATA SYNCED!")
-        print(f"\nView at: {WGER_BASE}/weight_enhanced.php")
+        print(f"\nView at: {WGER_BASE}/weight.php")
     elif withings_ok or nutrition_ok:
         print("\n⚠️  Partial sync completed")
     else:
