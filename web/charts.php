@@ -6,8 +6,8 @@
 declare(strict_types=1);
 date_default_timezone_set('America/New_York');
 
-$WGER_BASE  = 'https://your-wger-instance.com'; // ← your WGER URL
-$WGER_TOKEN = 'your_wger_api_token_here'; // ← WGER > Account > API Key
+$WGER_BASE  = getenv('WGER_BASE') ?: 'https://your-wger-instance.com';
+$WGER_TOKEN = getenv('WGER_TOKEN') ?: 'your_wger_api_token_here';
 
 $days = max(7, min(730, (int)($_GET['days'] ?? 90)));
 
@@ -16,34 +16,34 @@ $days = max(7, min(730, (int)($_GET['days'] ?? 90)));
 // ============================================================================
 $GROUPS = [
   'BODY COMPOSITION' => [
-    'weight'       => ['label' => 'Weight',       'unit' => 'lbs',      'source' => 'weightentry', 'category' => null,                   'factor' => 1.0],
-    'body_fat'     => ['label' => 'Body Fat',      'unit' => '%',        'source' => 'measurement', 'category' => 'Body Fat',             'factor' => 1.0],
-    'muscle_mass'  => ['label' => 'Muscle Mass',   'unit' => 'lbs',      'source' => 'measurement', 'category' => 'Muscle Mass',          'factor' => 2.20462],
-    'bone_mass'    => ['label' => 'Bone Mass',     'unit' => 'lbs',      'source' => 'measurement', 'category' => 'Bone Mass',            'factor' => 2.20462],
+    'weight'       => ['label' => 'Weight',       'unit' => 'lbs',      'source' => 'weightentry', 'category' => null,                   'factor' => 1.0,       'goal' => 175],
+    'body_fat'     => ['label' => 'Body Fat',      'unit' => '%',        'source' => 'measurement', 'category' => 'Body Fat',             'factor' => 1.0,       'goal' => 15],
+    'muscle_mass'  => ['label' => 'Muscle Mass',   'unit' => 'lbs',      'source' => 'measurement', 'category' => 'Muscle Mass',          'factor' => 2.20462,   'goal' => null],
+    'bone_mass'    => ['label' => 'Bone Mass',     'unit' => 'lbs',      'source' => 'measurement', 'category' => 'Bone Mass',            'factor' => 2.20462,   'goal' => null],
   ],
   'METABOLISM' => [
-    'bmr'          => ['label' => 'BMR',           'unit' => 'kcal/day', 'source' => 'measurement', 'category' => 'Basal Metabolic Rate', 'factor' => 1.0],
-    'metabolic_age'=> ['label' => 'Metabolic Age', 'unit' => 'yrs',      'source' => 'measurement', 'category' => 'Metabolic Age',        'factor' => 1.0],
-    'visceral_fat' => ['label' => 'Visceral Fat',  'unit' => 'index',    'source' => 'measurement', 'category' => 'Visceral Fat',         'factor' => 1.0],
+    'bmr'          => ['label' => 'BMR',           'unit' => 'kcal/day', 'source' => 'measurement', 'category' => 'Basal Metabolic Rate', 'factor' => 1.0,       'goal' => null],
+    'metabolic_age'=> ['label' => 'Metabolic Age', 'unit' => 'yrs',      'source' => 'measurement', 'category' => 'Metabolic Age',        'factor' => 1.0,       'goal' => null],
+    'visceral_fat' => ['label' => 'Visceral Fat',  'unit' => 'index',    'source' => 'measurement', 'category' => 'Visceral Fat',         'factor' => 1.0,       'goal' => null],
   ],
   'ACTIVITY' => [
-    'steps'        => ['label' => 'Steps',         'unit' => 'steps',    'source' => 'measurement', 'category' => 'Steps',                'factor' => 1000.0],
-    'distance'     => ['label' => 'Distance',      'unit' => 'mi',       'source' => 'measurement', 'category' => 'Distance',             'factor' => 0.621371],
-    'hydration'    => ['label' => 'Hydration',     'unit' => '%',        'source' => 'measurement', 'category' => 'Hydration',            'factor' => 1.0],
+    'steps'        => ['label' => 'Steps',         'unit' => 'steps',    'source' => 'measurement', 'category' => 'Steps',                'factor' => 1000.0,    'goal' => 10000],
+    'distance'     => ['label' => 'Distance',      'unit' => 'mi',       'source' => 'measurement', 'category' => 'Distance',             'factor' => 0.621371,  'goal' => null],
+    'hydration'    => ['label' => 'Hydration',     'unit' => '%',        'source' => 'measurement', 'category' => 'Hydration',            'factor' => 1.0,       'goal' => null],
   ],
   'NUTRITION' => [
-    'calories'          => ['label' => 'Food Calories',  'unit' => 'kcal', 'source' => 'measurement', 'category' => 'Daily Calories',        'factor' => 1.0],
-    'protein'           => ['label' => 'Protein',        'unit' => 'g',    'source' => 'measurement', 'category' => 'Daily Protein',         'factor' => 1.0],
-    'carbs'             => ['label' => 'Carbs',          'unit' => 'g',    'source' => 'measurement', 'category' => 'Daily Carbs',           'factor' => 1.0],
-    'fat'               => ['label' => 'Fat',            'unit' => 'g',    'source' => 'measurement', 'category' => 'Daily Fat',             'factor' => 1.0],
-    'exercise_calories' => ['label' => 'Exercise Cal',   'unit' => 'kcal', 'source' => 'measurement', 'category' => 'MFP Exercise Calories', 'factor' => 1.0],
+    'calories'          => ['label' => 'Food Calories',  'unit' => 'kcal', 'source' => 'measurement', 'category' => 'Daily Calories',        'factor' => 1.0,  'goal' => 1500],
+    'protein'           => ['label' => 'Protein',        'unit' => 'g',    'source' => 'measurement', 'category' => 'Daily Protein',         'factor' => 1.0,  'goal' => 150],
+    'carbs'             => ['label' => 'Carbs',          'unit' => 'g',    'source' => 'measurement', 'category' => 'Daily Carbs',           'factor' => 1.0,  'goal' => null],
+    'fat'               => ['label' => 'Fat',            'unit' => 'g',    'source' => 'measurement', 'category' => 'Daily Fat',             'factor' => 1.0,  'goal' => null],
+    'exercise_calories' => ['label' => 'Exercise Cal',   'unit' => 'kcal', 'source' => 'measurement', 'category' => 'MFP Exercise Calories', 'factor' => 1.0,  'goal' => null],
   ],
   'SLEEP' => [
-    'sleep_score'    => ['label' => 'Sleep Score',    'unit' => '/100', 'source' => 'measurement', 'category' => 'Sleep Score',            'factor' => 1.0],
-    'sleep_duration' => ['label' => 'Sleep Duration', 'unit' => 'hrs',  'source' => 'measurement', 'category' => 'Sleep Duration',         'factor' => 1.0],
-    'sleep_hrv'      => ['label' => 'HRV',            'unit' => 'ms',   'source' => 'measurement', 'category' => 'Sleep HRV',              'factor' => 1.0],
-    'sleep_hr'       => ['label' => 'Sleep HR',       'unit' => 'bpm',  'source' => 'measurement', 'category' => 'Sleep Heart Rate',       'factor' => 1.0],
-    'sleep_rr'       => ['label' => 'Resp Rate',      'unit' => 'brpm', 'source' => 'measurement', 'category' => 'Sleep Respiratory Rate', 'factor' => 1.0],
+    'sleep_score'    => ['label' => 'Sleep Score',    'unit' => '/100', 'source' => 'measurement', 'category' => 'Sleep Score',            'factor' => 1.0, 'goal' => 85],
+    'sleep_duration' => ['label' => 'Sleep Duration', 'unit' => 'hrs',  'source' => 'measurement', 'category' => 'Sleep Duration',         'factor' => 1.0, 'goal' => 8],
+    'sleep_hrv'      => ['label' => 'HRV',            'unit' => 'ms',   'source' => 'measurement', 'category' => 'Sleep HRV',              'factor' => 1.0, 'goal' => null],
+    'sleep_hr'       => ['label' => 'Sleep HR',       'unit' => 'bpm',  'source' => 'measurement', 'category' => 'Sleep Heart Rate',       'factor' => 1.0, 'goal' => null],
+    'sleep_rr'       => ['label' => 'Resp Rate',      'unit' => 'brpm', 'source' => 'measurement', 'category' => 'Sleep Respiratory Rate', 'factor' => 1.0, 'goal' => null],
   ],
 ];
 
@@ -89,7 +89,7 @@ function try_num_c(mixed $v): ?float {
 /**
  * Generate a mini SVG chart (280×180) for the dashboard grid.
  */
-function generate_mini_svg(array $points, string $unit, string $chartId): string {
+function generate_mini_svg(array $points, string $unit, string $chartId, ?float $goal = null): string {
   $n = count($points);
   if ($n === 0) {
     return '<div style="height:140px;display:flex;align-items:center;justify-content:center;color:#333;font-size:12px;">NO DATA</div>';
@@ -99,7 +99,7 @@ function generate_mini_svg(array $points, string $unit, string $chartId): string
   $dates = array_column($points, 'date');
 
   $svgW = 280; $svgH = 140;
-  $padL = 44; $padR = 8; $padT = 10; $padB = 22;
+  $padL = 44; $padR = 40; $padT = 10; $padB = 22;
   $plotW = $svgW - $padL - $padR;
   $plotH = $svgH - $padT - $padB;
 
@@ -109,6 +109,12 @@ function generate_mini_svg(array $points, string $unit, string $chartId): string
   $pad   = $range > 0 ? $range * 0.05 : max(abs($minV) * 0.05, 1);
   $yMin  = $minV - $pad;
   $yMax  = $maxV + $pad;
+
+  // Expand Y scale to include goal if outside data range
+  if ($goal !== null) {
+    if ($goal < $yMin) $yMin = $goal - $pad;
+    if ($goal > $yMax) $yMax = $goal + $pad;
+  }
   $yRange = $yMax - $yMin ?: 1;
 
   $toX = fn(int $i) => $padL + ($n > 1 ? $i / ($n - 1) : 0.5) * $plotW;
@@ -168,6 +174,14 @@ function generate_mini_svg(array $points, string $unit, string $chartId): string
           text-anchor="end" fill="#00AA22" font-family="Courier New,monospace"
           font-size="8"><?php echo $yl['label']; ?></text>
     <?php endforeach; ?>
+    <?php if ($goal !== null): ?>
+    <?php $goalY = round($toY($goal), 1); ?>
+    <line x1="<?php echo $padL; ?>" y1="<?php echo $goalY; ?>"
+          x2="<?php echo $padL + $plotW; ?>" y2="<?php echo $goalY; ?>"
+          stroke="#FFD700" stroke-opacity="0.8" stroke-width="1" stroke-dasharray="4,3"/>
+    <text x="<?php echo $padL + $plotW + 4; ?>" y="<?php echo $goalY + 3; ?>"
+          fill="#FFD700" font-family="Courier New,monospace" font-size="7"><?php echo $goal; ?></text>
+    <?php endif; ?>
     <path d="<?php echo $areaPath; ?>" fill="url(#<?php echo $gradId; ?>)"/>
     <polyline points="<?php echo $poly; ?>"
               fill="none" stroke="#00FF41" stroke-width="1.8"
@@ -429,7 +443,7 @@ $chartCounter = 0;
       <?php if ($n === 0): ?>
         <div class="no-data">NO DATA</div>
       <?php else: ?>
-        <?php echo generate_mini_svg($points, $cfg['unit'], $chartId); ?>
+        <?php echo generate_mini_svg($points, $cfg['unit'], $chartId, $cfg['goal'] ?? null); ?>
       <?php endif; ?>
 
       <div class="card-footer">

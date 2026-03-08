@@ -2,8 +2,8 @@
 declare(strict_types=1);
 date_default_timezone_set('America/New_York');
 
-$WGER_BASE  = 'https://your-wger-instance.com'; // ← your WGER URL
-$WGER_TOKEN = 'your_wger_api_token_here'; // ← WGER > Account > API Key
+$WGER_BASE  = getenv('WGER_BASE') ?: 'https://your-wger-instance.com';
+$WGER_TOKEN = getenv('WGER_TOKEN') ?: 'your_wger_api_token_here';
 
 // Grab a few quick stats for the hero display
 function quick_get(string $base, string $token, string $path, array $q = []): array {

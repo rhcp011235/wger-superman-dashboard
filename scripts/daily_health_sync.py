@@ -42,11 +42,6 @@ OUTPUT:
 """
 
 import os
-try:
-    from dotenv import load_dotenv
-    load_dotenv()
-except ImportError:
-    pass  # dotenv optional; set env vars manually or hardcode below
 import sys
 import re
 import json
@@ -88,8 +83,12 @@ else:
 SLEEPNUMBER_SYNC_ENABLED = SLEEPNUMBER_SYNC and SLEEPNUMBER_AVAILABLE
 
 # Withings OAuth
-WITHINGS_CLIENT_ID     = os.environ.get("WITHINGS_CLIENT_ID",     "your_withings_client_id_here")
-WITHINGS_CLIENT_SECRET = os.environ.get("WITHINGS_CLIENT_SECRET", "your_withings_client_secret_here")
+WITHINGS_CLIENT_ID = os.environ.get('WITHINGS_CLIENT_ID', 'your_withings_client_id')
+WITHINGS_CLIENT_SECRET = os.environ.get('WITHINGS_CLIENT_SECRET', 'your_withings_client_secret')
+
+# Prowl push notifications (iOS) — https://www.prowlapp.com
+PROWL_API_KEY = os.environ.get('PROWL_API_KEY', '')
+PROWL_APP     = "Health Sync"
 WITHINGS_TOKEN_FILE = str(Path(__file__).parent / "withings_tokens.json")
 
 # Sleep Number Credentials
@@ -98,8 +97,8 @@ SLEEPNUMBER_PASSWORD = "vjz@kqw!WMF*bpr7ufa"
 SLEEPNUMBER_TOKEN_FILE = str(Path(__file__).parent / "sleepnumber_session.json")
 
 # WGER
-WGER_BASE  = os.environ.get('WGER_BASE_URL',  'https://your-wger-instance.com')
-WGER_TOKEN = os.environ.get('WGER_TOKEN',   'your_wger_api_token_here')
+WGER_BASE = os.environ.get('WGER_BASE', 'https://your-wger-instance.com')
+WGER_TOKEN = os.environ.get('WGER_TOKEN', 'your_wger_api_token_here')
 
 # WGER Measurement Categories (created once)
 CATEGORY_CALORIES = None    # Daily Calories (kcal) - food
@@ -1275,11 +1274,59 @@ def main():
     if withings_ok and nutrition_ok:
         print("\n🎉 ALL DATA SYNCED!")
         print(f"\nView at: {WGER_BASE}/weight.php")
+        parts = []
+        if SLEEPNUMBER_SYNC_ENABLED:
+            parts.append(f"Sleep {'✓' if sleepnumber_ok else '✗'}")
+        parts += [f"Withings ✓", f"Nutrition ✓"]
+        send_prowl(
+            event=f"✅ Sync complete — {SYNC_DATE}",
+            description="\n".join(parts) + f"\n{WGER_BASE}/weight.php",
+            priority=0,
+        )
     elif withings_ok or nutrition_ok:
         print("\n⚠️  Partial sync completed")
+        failed = []
+        if not withings_ok:  failed.append("Withings")
+        if not nutrition_ok: failed.append("Nutrition")
+        if SLEEPNUMBER_SYNC_ENABLED and not sleepnumber_ok: failed.append("Sleep Number")
+        send_prowl(
+            event=f"⚠️ Partial sync — {SYNC_DATE}",
+            description="Failed: " + ", ".join(failed),
+            priority=1,
+        )
     else:
         print("\n❌ Sync failed")
+        send_prowl(
+            event=f"❌ Sync FAILED — {SYNC_DATE}",
+            description="Both Withings and Nutrition failed. Check the script.",
+            priority=2,
+        )
         sys.exit(1)
+
+def send_prowl(event: str, description: str, priority: int = 0) -> None:
+    """Send a push notification via Prowl (iOS).
+    priority: -2 (very low) to 2 (emergency). 0 = normal, 1 = high, -1 = low.
+    Silently swallows errors so a Prowl failure never breaks the sync.
+    """
+    if not PROWL_API_KEY:
+        return
+    try:
+        resp = requests.post(
+            "https://api.prowlapp.com/publicapi/add",
+            data={
+                "apikey":      PROWL_API_KEY,
+                "application": PROWL_APP,
+                "event":       event[:1024],
+                "description": description[:10000],
+                "priority":    priority,
+            },
+            timeout=10,
+        )
+        if resp.status_code != 200:
+            print(f"   [Prowl] Warning: HTTP {resp.status_code}")
+    except Exception as e:
+        print(f"   [Prowl] Warning: {e}")
+
 
 if __name__ == '__main__':
     main()

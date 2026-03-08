@@ -25,8 +25,8 @@ date_default_timezone_set('America/New_York');
 header('Content-Type: text/plain; charset=utf-8');
 
 // PRIVATE VERSION - Hardcoded credentials (DO NOT commit to git!)
-$WGER_BASE  = 'https://your-wger-instance.com'; // ← your WGER URL
-$WGER_TOKEN = 'your_wger_api_token_here'; // ← WGER > Account > API Key
+$WGER_BASE  = getenv('WGER_BASE') ?: 'https://your-wger-instance.com';
+$WGER_TOKEN = getenv('WGER_TOKEN') ?: 'your_wger_api_token_here';
 
 $export = $_GET['export'] ?? null; // json or csv for multi-day export
 $days = isset($_GET['days']) ? (int)$_GET['days'] : 30; // Number of days to export (default 30)
@@ -1119,6 +1119,119 @@ try {
   } catch (Throwable $e) {}
   $data['sleep_chart']      = !empty($sleep_chart) ? $sleep_chart : null;
   $data['sleep_chart_days'] = $chart_days;
+
+  // ---------------------------------------------------------------------------
+  // RECORDS & STREAKS (last 90 days of measurements + all-time weight)
+  // ---------------------------------------------------------------------------
+  $records = [];
+  try {
+    $rec_cutoff = date('Y-m-d', strtotime('-90 days'));
+    $today_str  = date('Y-m-d');
+
+    // Reuse category map if available, otherwise build it
+    $recCatIds = [];
+    $recCatResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/measurement-category/', ['limit' => 200]);
+    foreach ($recCatResp['results'] ?? [] as $cat) {
+      $recCatIds[$cat['name']][] = (int)$cat['id'];
+    }
+
+    // Fetch last 90 days of a named measurement category → [date => value]
+    $fetchHist = function(string $catName) use ($WGER_BASE, $WGER_TOKEN, $recCatIds, $rec_cutoff, $today_str): array {
+      $pts = [];
+      foreach ($recCatIds[$catName] ?? [] as $catId) {
+        $resp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/measurement/', [
+          'category' => $catId, 'limit' => 200, 'ordering' => '-date',
+        ]);
+        foreach ($resp['results'] ?? [] as $e) {
+          $d = extract_date($e['date'] ?? '');
+          if ($d < $rec_cutoff || $d > $today_str) continue;
+          $v = try_number($e['value']);
+          if ($v !== null && !isset($pts[$d])) $pts[$d] = $v;
+        }
+      }
+      ksort($pts);
+      return $pts;
+    };
+
+    // Streak calculator: walks date-keyed array oldest→newest.
+    // Returns ['current' => int, 'best' => int]
+    $streak = function(array $pts, callable $test) use ($today_str): array {
+      if (empty($pts)) return ['current' => 0, 'best' => 0];
+      $best = 0; $run = 0; $prev = null;
+      foreach ($pts as $d => $v) {
+        if ($prev !== null && (strtotime($d) - strtotime($prev)) / 86400 > 1) $run = 0;
+        $run = $test($v) ? $run + 1 : 0;
+        $best = max($best, $run);
+        $prev = $d;
+      }
+      $lastDate  = array_key_last($pts);
+      $lastVal   = $pts[$lastDate];
+      $daysAgo   = round((strtotime($today_str) - strtotime($lastDate)) / 86400);
+      $current   = ($daysAgo <= 1 && $test($lastVal)) ? $run : 0;
+      return ['current' => $current, 'best' => $best];
+    };
+
+    // ── Weight (all-time from already-fetched entries) ────────────────────
+    $allW = [];
+    foreach ($weightEntries as $w) {
+      $v = try_number($w['weight']);
+      if ($v !== null) $allW[extract_date($w['date'] ?? '')] = $v;
+    }
+    ksort($allW);
+    if (!empty($allW)) {
+      $records['weight_all_time_low']  = round(min($allW), 1);
+      $records['weight_all_time_high'] = round(max($allW), 1);
+      $records['weight_start']         = round(reset($allW), 1);
+      $records['weight_start_date']    = array_key_first($allW);
+      // Consecutive days of loss streak
+      $records['weight_loss_streak']   = $streak(
+        $allW,
+        function($v) use (&$allW, &$records) {
+          static $prev = null;
+          $out = ($prev !== null && $v < $prev);
+          $prev = $v;
+          return $out;
+        }
+      );
+    }
+
+    // ── Calories ≤ 1500 streak ────────────────────────────────────────────
+    $calPts = $fetchHist('Daily Calories');
+    if (!empty($calPts)) {
+      $calActive = array_filter($calPts, fn($v) => $v > 0);
+      $records['cal_streak'] = $streak($calActive, fn($v) => $v <= 1500);
+      $records['cal_avg']    = !empty($calActive) ? (int)round(array_sum($calActive) / count($calActive)) : null;
+      $records['cal_best']   = !empty($calActive) ? (int)round(min($calActive)) : null;
+    }
+
+    // ── Protein ≥ 150g streak ─────────────────────────────────────────────
+    $protPts = $fetchHist('Daily Protein');
+    if (!empty($protPts)) {
+      $records['prot_streak'] = $streak($protPts, fn($v) => $v >= 150);
+      $records['prot_avg']    = (int)round(array_sum($protPts) / count($protPts));
+      $records['prot_best']   = (int)round(max($protPts));
+    }
+
+    // ── Steps ≥ 10,000 streak (stored as ksteps) ──────────────────────────
+    $stepsPts = $fetchHist('Steps');
+    if (!empty($stepsPts)) {
+      $records['steps_streak'] = $streak($stepsPts, fn($v) => $v * 1000 >= 10000);
+      $records['steps_best']   = (int)round(max($stepsPts) * 1000);
+      $records['steps_avg']    = (int)round(array_sum($stepsPts) / count($stepsPts) * 1000);
+    }
+
+    // ── Sleep score ≥ 85 streak ───────────────────────────────────────────
+    $sleepPts = $fetchHist('Sleep Score');
+    if (!empty($sleepPts)) {
+      $records['sleep_streak'] = $streak($sleepPts, fn($v) => $v >= 85);
+      $records['sleep_best']   = (int)round(max($sleepPts));
+      $records['sleep_avg']    = (int)round(array_sum($sleepPts) / count($sleepPts));
+    }
+
+  } catch (Throwable $e) {
+    // Records are a bonus — never crash the page
+  }
+  $data['records'] = $records;
 
   // ---------------------------------------------------------------------------
   // MULTI-DAY EXPORT HANDLING
@@ -2243,6 +2356,115 @@ try {
           <?php endif; ?>
         </div>
       <?php endforeach; ?>
+    </div>
+    <?php endif; ?>
+
+    <?php if (!empty($data['records'])): ?>
+    <?php $rec = $data['records']; ?>
+    <div class="section">
+      <h2>▌RECORDS &amp; STREAKS</h2>
+
+      <?php
+        // Helper: render a streak badge
+        function streak_badge(int $current, int $best, string $label): string {
+          $fire  = $current >= 7 ? ' 🔥' : '';
+          $cbg   = $current > 0 ? 'rgba(0,255,65,0.15)' : 'transparent';
+          $ccol  = $current > 0 ? '#00FF41' : '#555';
+          return "
+          <div style='border:1px solid rgba(0,255,65,0.3);padding:12px;'>
+            <div style='color:#00CC28;font-size:0.72em;letter-spacing:1px;margin-bottom:6px;'>{$label}</div>
+            <div style='display:flex;gap:14px;align-items:flex-end;'>
+              <div style='background:{$cbg};padding:6px 12px;border:1px solid {$ccol};'>
+                <div style='font-size:0.65em;color:#00AA22;letter-spacing:1px;'>CURRENT</div>
+                <div style='font-size:1.4em;color:{$ccol};font-weight:bold;'>{$current}d{$fire}</div>
+              </div>
+              <div style='padding:6px 12px;border:1px solid rgba(0,255,65,0.2);'>
+                <div style='font-size:0.65em;color:#00AA22;letter-spacing:1px;'>BEST</div>
+                <div style='font-size:1.4em;color:#00DD33;font-weight:bold;'>{$best}d</div>
+              </div>
+            </div>
+          </div>";
+        }
+      ?>
+
+      <!-- All-time weight records -->
+      <?php if (!empty($rec['weight_all_time_low']) || !empty($rec['weight_all_time_high'])): ?>
+      <div style="margin-bottom:16px;">
+        <div style="color:#00CC28;font-size:0.8em;letter-spacing:2px;margin-bottom:10px;">ALL-TIME WEIGHT</div>
+        <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:10px;">
+          <?php if (isset($rec['weight_all_time_low'])): ?>
+          <div style="border:1px solid rgba(0,255,65,0.3);padding:12px;">
+            <div style="color:#00AA22;font-size:0.7em;letter-spacing:1px;">LOWEST EVER</div>
+            <div style="color:#00FF41;font-size:1.4em;font-weight:bold;"><?php echo $rec['weight_all_time_low']; ?> lbs</div>
+          </div>
+          <?php endif; ?>
+          <?php if (isset($rec['weight_all_time_high'])): ?>
+          <div style="border:1px solid rgba(0,255,65,0.3);padding:12px;">
+            <div style="color:#00AA22;font-size:0.7em;letter-spacing:1px;">HIGHEST EVER</div>
+            <div style="color:#555;font-size:1.4em;font-weight:bold;"><?php echo $rec['weight_all_time_high']; ?> lbs</div>
+          </div>
+          <?php endif; ?>
+          <?php if (isset($rec['weight_start'], $rec['weight_start_date'])): ?>
+          <div style="border:1px solid rgba(0,255,65,0.3);padding:12px;">
+            <div style="color:#00AA22;font-size:0.7em;letter-spacing:1px;">FIRST RECORDED</div>
+            <div style="color:#888;font-size:1.4em;font-weight:bold;"><?php echo $rec['weight_start']; ?> lbs</div>
+            <div style="color:#444;font-size:0.7em;"><?php echo $rec['weight_start_date']; ?></div>
+          </div>
+          <?php endif; ?>
+        </div>
+      </div>
+      <?php endif; ?>
+
+      <!-- Streak grid -->
+      <div style="color:#00CC28;font-size:0.8em;letter-spacing:2px;margin-bottom:10px;">90-DAY STREAKS</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(200px,1fr));gap:10px;margin-bottom:16px;">
+        <?php if (!empty($rec['cal_streak'])): ?>
+        <?php echo streak_badge($rec['cal_streak']['current'], $rec['cal_streak']['best'], 'CALORIES ≤ 1500 kcal'); ?>
+        <?php endif; ?>
+        <?php if (!empty($rec['prot_streak'])): ?>
+        <?php echo streak_badge($rec['prot_streak']['current'], $rec['prot_streak']['best'], 'PROTEIN ≥ 150g'); ?>
+        <?php endif; ?>
+        <?php if (!empty($rec['steps_streak'])): ?>
+        <?php echo streak_badge($rec['steps_streak']['current'], $rec['steps_streak']['best'], 'STEPS ≥ 10,000'); ?>
+        <?php endif; ?>
+        <?php if (!empty($rec['sleep_streak'])): ?>
+        <?php echo streak_badge($rec['sleep_streak']['current'], $rec['sleep_streak']['best'], 'SLEEP SCORE ≥ 85'); ?>
+        <?php endif; ?>
+      </div>
+
+      <!-- 90-day bests -->
+      <div style="color:#00CC28;font-size:0.8em;letter-spacing:2px;margin-bottom:10px;">90-DAY BESTS &amp; AVERAGES</div>
+      <div style="display:grid;grid-template-columns:repeat(auto-fit,minmax(140px,1fr));gap:10px;">
+        <?php if (!empty($rec['cal_best'])): ?>
+        <div style="border:1px solid rgba(0,255,65,0.25);padding:10px;">
+          <div style="color:#00AA22;font-size:0.68em;letter-spacing:1px;">LOWEST CAL DAY</div>
+          <div style="color:#00FF41;font-size:1.1em;"><?php echo number_format($rec['cal_best']); ?> kcal</div>
+          <div style="color:#555;font-size:0.7em;">avg <?php echo number_format($rec['cal_avg'] ?? 0); ?></div>
+        </div>
+        <?php endif; ?>
+        <?php if (!empty($rec['prot_best'])): ?>
+        <div style="border:1px solid rgba(0,255,65,0.25);padding:10px;">
+          <div style="color:#00AA22;font-size:0.68em;letter-spacing:1px;">BEST PROTEIN DAY</div>
+          <div style="color:#00FF41;font-size:1.1em;"><?php echo $rec['prot_best']; ?>g</div>
+          <div style="color:#555;font-size:0.7em;">avg <?php echo $rec['prot_avg'] ?? '—'; ?>g</div>
+        </div>
+        <?php endif; ?>
+        <?php if (!empty($rec['steps_best'])): ?>
+        <div style="border:1px solid rgba(0,255,65,0.25);padding:10px;">
+          <div style="color:#00AA22;font-size:0.68em;letter-spacing:1px;">BEST STEP DAY</div>
+          <div style="color:#00FF41;font-size:1.1em;"><?php echo number_format($rec['steps_best']); ?></div>
+          <div style="color:#555;font-size:0.7em;">avg <?php echo number_format($rec['steps_avg'] ?? 0); ?></div>
+        </div>
+        <?php endif; ?>
+        <?php if (!empty($rec['sleep_best'])): ?>
+        <div style="border:1px solid rgba(0,255,65,0.25);padding:10px;">
+          <div style="color:#00AA22;font-size:0.68em;letter-spacing:1px;">BEST SLEEP SCORE</div>
+          <div style="color:#00FF41;font-size:1.1em;"><?php echo $rec['sleep_best']; ?>/100</div>
+          <div style="color:#555;font-size:0.7em;">avg <?php echo $rec['sleep_avg'] ?? '—'; ?></div>
+        </div>
+        <?php endif; ?>
+      </div>
+
     </div>
     <?php endif; ?>
 

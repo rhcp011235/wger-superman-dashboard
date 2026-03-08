@@ -6,8 +6,8 @@
 declare(strict_types=1);
 date_default_timezone_set('America/New_York');
 
-$WGER_BASE  = 'https://your-wger-instance.com'; // ← your WGER URL
-$WGER_TOKEN = 'your_wger_api_token_here'; // ← WGER > Account > API Key
+$WGER_BASE  = getenv('WGER_BASE') ?: 'https://your-wger-instance.com';
+$WGER_TOKEN = getenv('WGER_TOKEN') ?: 'your_wger_api_token_here';
 
 // ============================================================================
 // METRIC REGISTRY
@@ -33,6 +33,32 @@ $METRICS = [
   'sleep_hrv'       => ['label' => 'HRV',                 'unit' => 'ms',      'source' => 'measurement', 'category' => 'Sleep HRV',                'factor' => 1.0],
   'sleep_hr'        => ['label' => 'Sleep HR',            'unit' => 'bpm',     'source' => 'measurement', 'category' => 'Sleep Heart Rate',         'factor' => 1.0],
   'sleep_rr'        => ['label' => 'Resp Rate',           'unit' => 'brpm',    'source' => 'measurement', 'category' => 'Sleep Respiratory Rate',   'factor' => 1.0],
+];
+
+// ============================================================================
+// GOALS  — set to null to hide the goal line for that metric
+// ============================================================================
+$GOALS = [
+  'weight'            => 175,    // lbs
+  'body_fat'          => 15,     // %
+  'muscle_mass'       => null,
+  'bone_mass'         => null,
+  'hydration'         => null,
+  'bmr'               => null,
+  'metabolic_age'     => null,
+  'visceral_fat'      => null,
+  'steps'             => 10000,  // steps/day
+  'distance'          => null,
+  'calories'          => 1500,   // kcal/day
+  'protein'           => 150,    // g/day
+  'carbs'             => null,
+  'fat'               => null,
+  'exercise_calories' => null,
+  'sleep_score'       => 85,     // /100
+  'sleep_duration'    => 8,      // hrs
+  'sleep_hrv'         => null,
+  'sleep_hr'          => null,
+  'sleep_rr'          => null,
 ];
 
 // ============================================================================
@@ -76,7 +102,7 @@ function try_num_g(mixed $v): ?float {
  * Generate an SVG line chart and return as HTML string.
  * $points: array of ['date'=>'YYYY-MM-DD','value'=>float], oldest→newest
  */
-function generate_svg_chart(array $points, string $label, string $unit, int $days, string $chartId = 'chart'): string {
+function generate_svg_chart(array $points, string $label, string $unit, int $days, string $chartId = 'chart', ?float $goal = null): string {
   $n = count($points);
   if ($n === 0) return '<p style="color:#888;font-style:italic">No data to chart.</p>';
 
@@ -84,7 +110,7 @@ function generate_svg_chart(array $points, string $label, string $unit, int $day
   $dates = array_column($points, 'date');
 
   $svgW = 900; $svgH = 280;
-  $padL = 56; $padR = 20; $padT = 20; $padB = 30;
+  $padL = 56; $padR = 56; $padT = 20; $padB = 30;
   $plotW = $svgW - $padL - $padR;
   $plotH = $svgH - $padT - $padB;
 
@@ -95,6 +121,12 @@ function generate_svg_chart(array $points, string $label, string $unit, int $day
   $pad   = $range > 0 ? $range * 0.05 : max(abs($minV) * 0.05, 1);
   $yMin  = $minV - $pad;
   $yMax  = $maxV + $pad;
+
+  // Expand Y scale to include goal line if outside data range
+  if ($goal !== null) {
+    if ($goal < $yMin) $yMin = $goal - $pad;
+    if ($goal > $yMax) $yMax = $goal + $pad;
+  }
   $yRange = $yMax - $yMin ?: 1;
 
   $toX = fn(int $i) => $padL + ($n > 1 ? $i / ($n - 1) : 0.5) * $plotW;
@@ -158,6 +190,17 @@ function generate_svg_chart(array $points, string $label, string $unit, int $day
           text-anchor="end" fill="#00DD33" font-family="Courier New,monospace"
           font-size="11"><?php echo $yl['label']; ?></text>
     <?php endforeach; ?>
+
+    <!-- goal line -->
+    <?php if ($goal !== null): ?>
+    <?php $goalY = round($toY($goal), 1); ?>
+    <line x1="<?php echo $padL; ?>" y1="<?php echo $goalY; ?>"
+          x2="<?php echo $padL + $plotW; ?>" y2="<?php echo $goalY; ?>"
+          stroke="#FFD700" stroke-opacity="0.8" stroke-width="1.5" stroke-dasharray="6,4"/>
+    <text x="<?php echo $padL + $plotW + 6; ?>" y="<?php echo $goalY + 4; ?>"
+          fill="#FFD700" font-family="Courier New,monospace" font-size="10">
+      GOAL <?php echo $goal; ?></text>
+    <?php endif; ?>
 
     <!-- area fill -->
     <path d="<?php echo $areaPath; ?>" fill="url(#<?php echo $gradId; ?>)"/>
@@ -469,9 +512,16 @@ header('Content-Type: text/html; charset=utf-8');
        (<?php echo htmlspecialchars($metaInfo['unit']); ?>)
        — Last <?php echo $days; ?> Days</h2>
 
-    <?php echo generate_svg_chart($pointsArr, $metaInfo['label'], $metaInfo['unit'], $days, 'main'); ?>
+    <?php $metricGoal = $GOALS[$metric_slug] ?? null; ?>
+    <?php echo generate_svg_chart($pointsArr, $metaInfo['label'], $metaInfo['unit'], $days, 'main', $metricGoal); ?>
 
-    <div class="subtext">Hover dots for exact values &nbsp;|&nbsp; <?php echo $count; ?> data points</div>
+    <div class="subtext">
+      Hover dots for exact values &nbsp;|&nbsp; <?php echo $count; ?> data points
+      <?php if ($metricGoal !== null): ?>
+      &nbsp;|&nbsp; <span style="color:#FFD700">- - -</span>
+      Goal: <?php echo $metricGoal; ?> <?php echo htmlspecialchars($metaInfo['unit']); ?>
+      <?php endif; ?>
+    </div>
   </div>
 
   <!-- Stats -->
