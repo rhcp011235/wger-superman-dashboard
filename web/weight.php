@@ -25,8 +25,8 @@ date_default_timezone_set('America/New_York');
 header('Content-Type: text/plain; charset=utf-8');
 
 // PRIVATE VERSION - Hardcoded credentials (DO NOT commit to git!)
-$WGER_BASE  = getenv('WGER_BASE') ?: 'https://your-wger-instance.com';
-$WGER_TOKEN = getenv('WGER_TOKEN') ?: 'your_wger_api_token_here';
+$WGER_BASE  = 'https://weight.rhcp011235.com';
+$WGER_TOKEN = 'e4aa72c36288c2c60105bca3977178c8b1d09836';
 
 $export = $_GET['export'] ?? null; // json or csv for multi-day export
 $days = isset($_GET['days']) ? (int)$_GET['days'] : 30; // Number of days to export (default 30)
@@ -183,7 +183,7 @@ function collect_day_data(string $date, string $base, string $token, array $cate
   }
   $goal_cals = 1500;
   $nutrition['goal_calories']      = $goal_cals;
-  $nutrition['remaining_calories'] = $goal_cals - $nutrition['calories'] + $nutrition['exercise_cals'];
+  $nutrition['remaining_mfp_calories'] = $goal_cals - $nutrition['calories'] + $nutrition['exercise_cals'];
   $data['nutrition'] = $nutrition;
 
   // --------------------------------------------------------------------------
@@ -208,11 +208,13 @@ function collect_day_data(string $date, string $base, string $token, array $cate
   // --------------------------------------------------------------------------
   // Activity (steps + distance)
   // --------------------------------------------------------------------------
-  $stepsKsteps = $getMeasVal('Steps');
-  $distanceKm  = $getMeasVal('Distance');
+  $stepsKsteps      = $getMeasVal('Steps');
+  $workoutDistKm    = $getMeasVal('Distance');        // Workout/exercise sessions only
+  $totalDistKm      = $getMeasVal('Total Distance');  // Full-day all movement
   $data['activity'] = [
-    'steps'       => $stepsKsteps !== null ? (int)round($stepsKsteps * 1000) : null,
-    'distance_mi' => $distanceKm  !== null ? round($distanceKm * 0.621371, 2)  : null,
+    'steps'              => $stepsKsteps   !== null ? (int)round($stepsKsteps * 1000) : null,
+    'workout_distance_mi'=> $workoutDistKm !== null ? round($workoutDistKm * 0.621371, 2) : null,
+    'total_distance_mi'  => $totalDistKm   !== null ? round($totalDistKm   * 0.621371, 2) : null,
   ];
 
   // --------------------------------------------------------------------------
@@ -317,7 +319,7 @@ try {
     if ($wDate >= $chart_cutoff && $wDate <= $date) {
       $lb = try_number($w['weight']);
       if ($lb !== null) {
-        $weight_chart_points[$wDate] = round($lb, 1); // already in lbs
+        $weight_chart_points[$wDate] = round($lb, 2); // already in lbs
       }
     }
   }
@@ -359,8 +361,8 @@ try {
     }
 
     $data['weight']['total_change_lb'] = round($weight_lb - $starting_weight, 2);
-    $data['weight']['starting_weight_lb'] = $starting_weight;
-    $data['weight']['starting_date'] = $fitness_start_date;
+    $data['weight']['journey_start_weight_lb'] = $starting_weight;
+    $data['weight']['journey_start_date'] = $fitness_start_date;
   }
 
   // ---------------------------------------------------------------------------
@@ -480,68 +482,64 @@ try {
 
   // Calculate remaining: Goal - Food + Exercise (matches MFP formula)
   // Example: 1,500 - 930 + 804 = 1,374 kcal remaining
-  $data['nutrition']['remaining_calories'] = $data['nutrition']['goal_calories']
+  $data['nutrition']['remaining_mfp_calories'] = $data['nutrition']['goal_calories']
     ? ($data['nutrition']['goal_calories'] - $data['nutrition']['calories'] + $data['nutrition']['exercise_cals'])
     : null;
 
   // ---------------------------------------------------------------------------
-  // 3. WORKOUT/EXERCISE DATA
+  // 3. WORKOUT SESSIONS (Cardio routine stored by sync script)
   // ---------------------------------------------------------------------------
   try {
-    $workoutResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/workout/', ['limit' => 100]);
-    $sessionResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/workoutsession/', [
-      'limit' => 100,
-      'ordering' => '-date',
-    ]);
-
-    $sessions = $sessionResp['results'] ?? [];
-    $todaySessions = array_filter($sessions, function($s) use ($date) {
-      $sDate = extract_date($s['date'] ?? '');
-      return $sDate === $date;
-    });
-
-    $workoutData = [
-      'sessions_today' => count($todaySessions),
-      'sessions' => [],
-      'total_exercises' => 0,
-      'total_sets' => 0,
-      'total_reps' => 0,
-      'total_volume_kg' => 0,
-    ];
-
-    foreach ($todaySessions as $session) {
-      $sessionInfo = [
-        'workout_id' => $session['workout'] ?? null,
-        'time' => $session['time_start'] ?? null,
-        'duration' => $session['time_end'] ?? null,
-        'impression' => $session['impression'] ?? null,
-        'notes' => $session['notes'] ?? null,
-      ];
-
-      // Try to get workout details
-      if (isset($session['workout'])) {
-        try {
-          $workoutDetail = wger_get($WGER_BASE, $WGER_TOKEN, "/api/v2/workout/{$session['workout']}/", []);
-          $sessionInfo['workout_name'] = $workoutDetail['name'] ?? 'Unnamed';
-        } catch (Throwable $e) {
-          $sessionInfo['workout_name'] = 'Unknown';
+    $cardioSessions = [];
+    {
+      $sessionResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/workoutsession/', [
+        'limit'    => 50,
+        'ordering' => '-date',
+      ]);
+      foreach ($sessionResp['results'] ?? [] as $s) {
+        if (extract_date($s['date'] ?? '') !== $date) continue;
+        $stats = json_decode($s['notes'] ?? '{}', true) ?: [];
+        // Parse display time from time_start
+        $timeStart = $s['time_start'] ?? null;
+        $timeEnd   = $s['time_end']   ?? null;
+        $displayTime = null;
+        if ($timeStart) {
+          $t = DateTime::createFromFormat('H:i:s', $timeStart);
+          $displayTime = $t ? $t->format('g:i A') : $timeStart;
         }
+        $durationMin = null;
+        if ($timeStart && $timeEnd) {
+          $ts = DateTime::createFromFormat('H:i:s', $timeStart);
+          $te = DateTime::createFromFormat('H:i:s', $timeEnd);
+          if ($ts && $te) $durationMin = (int)round(($te->getTimestamp() - $ts->getTimestamp()) / 60);
+        }
+        $cardioSessions[] = [
+          'type'         => $stats['type']       ?? 'Activity',
+          'time'         => $displayTime,
+          'duration_min' => $durationMin,
+          'dist_mi'      => $stats['dist_mi']    ?? null,
+          'active_cal'   => $stats['active_cal'] ?? null,
+          'steps'        => $stats['steps']      ?? null,
+        ];
       }
-
-      $workoutData['sessions'][] = $sessionInfo;
     }
 
-    $data['workouts'] = $workoutData;
+    // Compute totals across all sessions
+    $totals = ['duration_min' => 0, 'dist_mi' => 0.0, 'active_cal' => 0, 'steps' => 0];
+    foreach ($cardioSessions as $s) {
+      $totals['duration_min'] += $s['duration_min'] ?? 0;
+      $totals['dist_mi']      += $s['dist_mi']      ?? 0;
+      $totals['active_cal']   += $s['active_cal']   ?? 0;
+      $totals['steps']        += $s['steps']        ?? 0;
+    }
+    $totals['dist_mi'] = round($totals['dist_mi'], 2);
+
+    $data['workouts'] = [
+      'sessions' => $cardioSessions,
+      'totals'   => $totals,
+    ];
   } catch (Throwable $e) {
-    // Workout endpoint not available in this WGER instance - skip silently
-    // Future structure when API is available:
-    // "workouts": {
-    //   "total_duration_min": 92,
-    //   "sessions": [
-    //     { "type": "walk", "duration_min": 77, "calories": 800 }
-    //   ]
-    // }
-    $data['workouts'] = null;
+    $data['workouts'] = ['sessions' => [], 'totals' => []];
   }
 
   // ---------------------------------------------------------------------------
@@ -607,7 +605,7 @@ try {
           $unit = 'lbs';
         }
 
-        if ($catName === 'Distance' && $unit === 'km') {
+        if (($catName === 'Distance' || $catName === 'Total Distance') && $unit === 'km') {
           $value = round($value * 0.621371, 2);
           $unit = 'mi';
         }
@@ -716,7 +714,7 @@ try {
               $unit = 'lbs';
             }
 
-            if ($catName === 'Distance' && $unit === 'km') {
+            if (($catName === 'Distance' || $catName === 'Total Distance') && $unit === 'km') {
               $value = round($value * 0.621371, 2);
               $unit = 'mi';
             }
@@ -728,10 +726,17 @@ try {
           }
         }
 
-        $data['measurements'] = $measurementData;
-        $data['date'] = $date;
+        // Only merge nutrition categories from the fallback date — preserve today's
+        // activity data (Steps, Distance, Total Distance, Active Calories, etc.)
+        $nutritionCats = ['Daily Calories', 'Daily Protein', 'Daily Carbs', 'Daily Fat', 'MFP Exercise Calories'];
+        foreach ($nutritionCats as $nc) {
+          if (isset($measurementData['categories'][$nc])) {
+            $data['measurements']['categories'][$nc] = $measurementData['categories'][$nc];
+          }
+        }
         $data['using_most_recent'] = true;
         $data['requested_date'] = $requestedDate;
+        $data['nutrition_date'] = $date; // nutrition pulled from this date
 
         // Update nutrition from measurements
         $data['nutrition']['calories'] = $measurementData['categories']['Daily Calories']['value'] ?? 0;
@@ -741,7 +746,7 @@ try {
         $data['nutrition']['exercise_cals'] = $measurementData['categories']['MFP Exercise Calories']['value'] ?? 0;
 
         // Recalculate remaining with exercise included
-        $data['nutrition']['remaining_calories'] = $data['nutrition']['goal_calories']
+        $data['nutrition']['remaining_mfp_calories'] = $data['nutrition']['goal_calories']
           ? ($data['nutrition']['goal_calories'] - $data['nutrition']['calories'] + $data['nutrition']['exercise_cals'])
           : null;
       }
@@ -758,19 +763,30 @@ try {
   $age = 44;         // From profile
   $gender = 1;       // 1=male, 2=female
 
-  // BMR = 10×weight(kg) + 6.25×height(cm) - 5×age + 5 (male) or -161 (female)
-  $bmr = 10 * $weight_kg + 6.25 * $height_cm - 5 * $age;
-  $bmr += ($gender == 1) ? 5 : -161;
+  // BMR — two sources, clearly named:
+  // bmr_calculated: Mifflin-St Jeor formula using today's weight
+  // bmr_device: from Withings scale (uses body composition — more accurate when available)
+  $bmr_calculated = 10 * $weight_kg + 6.25 * $height_cm - 5 * $age + (($gender == 1) ? 5 : -161);
+  $bmr_device     = $data['measurements']['categories']['Basal Metabolic Rate']['value'] ?? null;
+  // Use device BMR for TDEE when available (accounts for actual body composition)
+  $bmr            = $bmr_device ?? $bmr_calculated;
 
-  // TDEE = BMR × activity factor (moderate activity = 1.55)
-  $activity_factor = 1.55;  // Based on profile: moderate work + sport
-  $tdee = $bmr * $activity_factor;
+  // Extract activity data first — needed for TDEE calculation below
+  $steps                   = $data['measurements']['categories']['Steps']['value'] ?? 0;
+  $distance_mi             = $data['measurements']['categories']['Distance']['value'] ?? 0;
+  $total_distance_mi       = $data['measurements']['categories']['Total Distance']['value'] ?? 0;
+  $distance_km             = round($distance_mi * 1.60934, 2);
+  $total_distance_km       = round($total_distance_mi * 1.60934, 2);
+  $daily_active_kcal_device = $data['measurements']['categories']['Daily Active Calories']['value'] ?? 0;
 
-  // Extract activity data from measurements
-  $steps = $data['measurements']['categories']['Steps']['value'] ?? 0;
-  $distance_mi = $data['measurements']['categories']['Distance']['value'] ?? 0;
-  $distance_km = round($distance_mi * 1.60934, 2); // Convert miles to km
-  $active_device_kcal = $data['measurements']['categories']['Calories']['value'] ?? 0;
+  // TDEE: BMR + actual measured active burn when available, else BMR × 1.55 estimate
+  if ($daily_active_kcal_device > 0) {
+    $tdee        = $bmr + $daily_active_kcal_device;
+    $tdee_source = 'device';
+  } else {
+    $tdee        = $bmr * 1.55;
+    $tdee_source = 'estimated';
+  }
 
   // Extract body composition data from already-fetched measurement categories.
   // Uses dynamic name lookup (handles duplicate category IDs correctly).
@@ -785,37 +801,39 @@ try {
   $hydration_pct  = $data['measurements']['categories']['Hydration']['value'] ?? null;
 
   // Extract energy and macro data
-  $intake_kcal = $data['nutrition']['calories'] ?? 0;
-  $exercise_mfp_kcal = $data['nutrition']['exercise_cals'] ?? 0;
-  $goal_intake_kcal = $data['nutrition']['goal_calories'] ?? 1500;
-  $remaining_mfp_kcal = $data['nutrition']['remaining_calories'] ?? 0;
-  $protein_g = $data['nutrition']['protein_g'] ?? 0;
-  $carbs_g = $data['nutrition']['carbs_g'] ?? 0;
-  $fat_g = $data['nutrition']['fat_g'] ?? 0;
-  $sodium_mg = $data['nutrition']['sodium_mg'] ?? 0;
+  $intake_kcal              = $data['nutrition']['calories'] ?? 0;
+  $workout_kcal_logged      = $data['nutrition']['exercise_cals'] ?? 0;  // MFP-logged workout calories
+  $goal_intake_kcal         = $data['nutrition']['goal_calories'] ?? 1500;
+  $remaining_mfp_kcal       = $data['nutrition']['remaining_mfp_calories'] ?? 0;
+  $protein_g                = $data['nutrition']['protein_g'] ?? 0;
+  $carbs_g                  = $data['nutrition']['carbs_g'] ?? 0;
+  $fat_g                    = $data['nutrition']['fat_g'] ?? 0;
+  $sodium_mg                = $data['nutrition']['sodium_mg'] ?? 0;
 
-  // Calculate net calories
-  // Net = intake - (goal - exercise) = intake - goal + exercise
-  $net_kcal_vs_goal = $intake_kcal - $goal_intake_kcal + $exercise_mfp_kcal;
-  // Net vs TDEE = intake + exercise - TDEE (true deficit/surplus)
-  $net_kcal_vs_tdee = $intake_kcal + $exercise_mfp_kcal - $tdee;
+  // MFP allowance = goal + workout calories earned back (MFP's own logic)
+  $mfp_allowance_kcal       = $goal_intake_kcal + $workout_kcal_logged;
+  // How far under/over your MFP allowance you are
+  $net_vs_mfp_allowance     = $intake_kcal - $mfp_allowance_kcal;
+  // True deficit vs TDEE — do not add workout_kcal_logged (already in TDEE)
+  $net_kcal_vs_tdee         = $intake_kcal - $tdee;
 
-  // Add clean, ChatGPT-friendly structure
-  // Units: ALWAYS kcal (kilocalories), never kJ
   $data['energy'] = [
-    'intake_kcal' => $intake_kcal,              // Food consumed
-    'exercise_mfp_kcal' => $exercise_mfp_kcal,  // MFP logged exercise
-    'active_device_kcal' => round($active_device_kcal, 2), // Apple/Withings active calories
-    'goal_intake_kcal' => $goal_intake_kcal,    // MFP daily goal
-    'remaining_mfp_kcal' => $remaining_mfp_kcal, // MFP remaining (goal - intake + exercise)
-    'net_kcal_vs_goal' => round($net_kcal_vs_goal, 0),     // Surplus/deficit vs MFP goal
-    'net_kcal_vs_tdee' => round($net_kcal_vs_tdee, 0),     // TRUE deficit vs actual TDEE
+    'intake_kcal'              => $intake_kcal,
+    'workout_kcal_logged'      => $workout_kcal_logged,
+    'daily_active_kcal_device' => round($daily_active_kcal_device, 0),
+    'goal_intake_kcal'         => $goal_intake_kcal,
+    'mfp_allowance_kcal'       => $mfp_allowance_kcal,        // goal + workout earned (MFP logic)
+    'remaining_mfp_kcal'       => $remaining_mfp_kcal,        // straight from MFP app
+    'net_vs_mfp_allowance'     => round($net_vs_mfp_allowance, 0), // intake - mfp_allowance
+    'net_kcal_vs_tdee'         => round($net_kcal_vs_tdee, 0),     // intake - TDEE (true deficit)
   ];
 
-  // Units: steps = count, distance = ALWAYS km (never miles)
   $data['activity'] = [
-    'steps' => $steps,            // Daily step count
-    'distance_km' => $distance_km, // ALWAYS km (converted from device)
+    'steps'               => $steps,
+    'workout_distance_km' => $distance_km,
+    'workout_distance_mi' => $distance_km > 0 ? round($distance_km * 0.621371, 2) : null,
+    'total_distance_km'   => $total_distance_km,
+    'total_distance_mi'   => $total_distance_km > 0 ? round($total_distance_km * 0.621371, 2) : null,
   ];
 
   // Macros (for ChatGPT analysis)
@@ -834,9 +852,12 @@ try {
   $deficit = $tdee - $calories_consumed;
 
   $data['metabolism'] = [
-    'bmr_kcal' => round($bmr, 0),      // Basal Metabolic Rate (at rest)
-    'tdee_kcal' => round($tdee, 0),    // Total Daily Energy Expenditure (BMR × activity factor)
-    'deficit_kcal' => round($deficit, 0), // Daily calorie deficit (positive = deficit, negative = surplus)
+    'bmr_calculated_kcal' => round($bmr_calculated, 0),  // Mifflin-St Jeor formula
+    'bmr_device_kcal'     => $bmr_device !== null ? round($bmr_device, 0) : null, // Withings scale
+    'bmr_kcal'            => round($bmr, 0),              // Active BMR used for TDEE (device preferred)
+    'tdee_kcal'           => round($tdee, 0),
+    'tdee_source'         => $tdee_source,
+    'deficit_kcal'        => round($deficit, 0),
   ];
 
   // Calculate fat mass and lean mass from body composition
@@ -1171,7 +1192,17 @@ try {
       return ['current' => $current, 'best' => $best];
     };
 
-    // ── Weight (all-time from already-fetched entries) ────────────────────
+    // ── Weight (all-time min/max via sorted API calls, recent for streak) ───
+    // Use targeted ordering to find true all-time high/low without fetching all entries
+    $wtLoResp  = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/weightentry/', ['limit' => 1, 'ordering' => 'weight']);
+    $wtHiResp  = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/weightentry/', ['limit' => 1, 'ordering' => '-weight']);
+    $wtFirstResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/weightentry/', ['limit' => 1, 'ordering' => 'date']);
+    $allTimeLow  = try_number($wtLoResp['results'][0]['weight']  ?? null);
+    $allTimeHigh = try_number($wtHiResp['results'][0]['weight']  ?? null);
+    $firstWeight = try_number($wtFirstResp['results'][0]['weight'] ?? null);
+    $firstDate   = extract_date($wtFirstResp['results'][0]['date'] ?? '');
+
+    // Use already-fetched recent entries for streak calculation (limit=365 is sufficient)
     $allW = [];
     foreach ($weightEntries as $w) {
       $v = try_number($w['weight']);
@@ -1179,10 +1210,10 @@ try {
     }
     ksort($allW);
     if (!empty($allW)) {
-      $records['weight_all_time_low']  = round(min($allW), 1);
-      $records['weight_all_time_high'] = round(max($allW), 1);
-      $records['weight_start']         = round(reset($allW), 1);
-      $records['weight_start_date']    = array_key_first($allW);
+      $records['weight_all_time_low']  = $allTimeLow  !== null ? round($allTimeLow,  2) : round(min($allW), 2);
+      $records['weight_all_time_high'] = $allTimeHigh !== null ? round($allTimeHigh, 2) : round(max($allW), 2);
+      $records['lifetime_weight_start']      = $firstWeight !== null ? round($firstWeight, 2) : round(reset($allW), 2);
+      $records['lifetime_weight_start_date'] = $firstDate ?: array_key_first($allW);
       // Consecutive days of loss streak
       $records['weight_loss_streak']   = $streak(
         $allW,
@@ -1238,9 +1269,17 @@ try {
   // ---------------------------------------------------------------------------
 
   if ($export === 'json' || $export === 'csv') {
-    $export_data = [];
+    set_time_limit(300); // allow up to 5 min for large exports
 
-    // Build category map once (avoids repeated API calls per day)
+    // Build the list of dates we need
+    $export_dates = [];
+    for ($i = 0; $i < $days; $i++) {
+      $export_dates[] = date('Y-m-d', strtotime("-$i days", strtotime($requestedDate)));
+    }
+    $date_oldest = end($export_dates);
+    $date_newest = reset($export_dates);
+
+    // ── Step 1: Build category name → [id, ...] map (1 API call) ────────────
     $exportCategoryNameToIds = [];
     try {
       $catResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/measurement-category/', ['limit' => 200]);
@@ -1249,11 +1288,162 @@ try {
       }
     } catch (Throwable $e) {}
 
-    // Collect data starting from today going backwards
-    for ($i = 0; $i < $days; $i++) {
-      $export_date = date('Y-m-d', strtotime("-$i days", strtotime($requestedDate)));
-      $day_data = collect_day_data($export_date, $WGER_BASE, $WGER_TOKEN, $exportCategoryNameToIds);
-      $export_data[] = $day_data;
+    // ── Step 2: Bulk-fetch weight entries (1 API call) ────────────────────────
+    $weightByDate = [];
+    try {
+      $wResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/weightentry/', [
+        'limit' => max(400, $days + 10), 'ordering' => '-date',
+      ]);
+      foreach ($wResp['results'] ?? [] as $w) {
+        $d = extract_date($w['date'] ?? '');
+        if (!isset($weightByDate[$d])) $weightByDate[$d] = try_number($w['weight']);
+      }
+    } catch (Throwable $e) {}
+
+    // ── Step 3: Bulk-fetch each measurement category (1 call per category) ───
+    // All categories needed for export
+    $allCatNames = [
+      'Daily Calories', 'MFP Exercise Calories', 'Daily Protein', 'Daily Carbs', 'Daily Fat',
+      'Daily Sodium', 'Daily Fiber', 'Daily Sugar', 'Saturated Fat', 'Polyunsaturated Fat',
+      'Monounsaturated Fat', 'Trans Fat', 'Cholesterol', 'Potassium',
+      'Vitamin A', 'Vitamin C', 'Calcium', 'Iron',
+      'Sleep Duration', 'Sleep Score', 'Sleep Heart Rate', 'Sleep HRV', 'Sleep Respiratory Rate',
+      'Steps', 'Distance', 'Total Distance', 'Daily Active Calories',
+      'Body Fat', 'Muscle Mass', 'Bone Mass', 'Basal Metabolic Rate',
+      'Metabolic Age', 'Visceral Fat', 'Hydration',
+      'Resting Heart Rate', 'AH Active Calories',
+    ];
+    // $bulk[catName][date] = value
+    $bulk = [];
+    foreach ($allCatNames as $catName) {
+      $bulk[$catName] = [];
+      foreach ($exportCategoryNameToIds[$catName] ?? [] as $catId) {
+        try {
+          $mResp = wger_get($WGER_BASE, $WGER_TOKEN, '/api/v2/measurement/', [
+            'category' => $catId, 'limit' => max(400, $days + 10), 'ordering' => '-date',
+          ]);
+          foreach ($mResp['results'] ?? [] as $m) {
+            $d = extract_date($m['date'] ?? '');
+            if (!isset($bulk[$catName][$d])) {
+              $v = try_number($m['value'] ?? null);
+              if ($v !== null) $bulk[$catName][$d] = $v;
+            }
+          }
+        } catch (Throwable $e) {}
+      }
+    }
+
+    // ── Step 4: Assemble per-day records from bulk maps (no more API calls) ──
+    $getMeasBulk = function(string $catName, string $date) use (&$bulk): ?float {
+      return $bulk[$catName][$date] ?? null;
+    };
+
+    $export_data = [];
+    foreach ($export_dates as $export_date) {
+      $weight_lb = $weightByDate[$export_date] ?? null;
+
+      $nutritionFields = [
+        'calories'               => 'Daily Calories',
+        'exercise_cals'          => 'MFP Exercise Calories',
+        'protein_g'              => 'Daily Protein',
+        'carbs_g'                => 'Daily Carbs',
+        'fat_g'                  => 'Daily Fat',
+        'sodium_mg'              => 'Daily Sodium',
+        'fiber_g'                => 'Daily Fiber',
+        'sugar_g'                => 'Daily Sugar',
+        'saturated_fat_g'        => 'Saturated Fat',
+        'polyunsaturated_fat_g'  => 'Polyunsaturated Fat',
+        'monounsaturated_fat_g'  => 'Monounsaturated Fat',
+        'trans_fat_g'            => 'Trans Fat',
+        'cholesterol_mg'         => 'Cholesterol',
+        'potassium_mg'           => 'Potassium',
+        'vitamin_a_iu'           => 'Vitamin A',
+        'vitamin_c_mg'           => 'Vitamin C',
+        'calcium_mg'             => 'Calcium',
+        'iron_mg'                => 'Iron',
+      ];
+      $nutrition = [];
+      foreach ($nutritionFields as $field => $catName) {
+        $v = $getMeasBulk($catName, $export_date);
+        $nutrition[$field] = ($v !== null && $v > 0) ? $v : 0;
+      }
+      $goal_cals = 1500;
+      $nutrition['goal_calories']      = $goal_cals;
+      $nutrition['remaining_mfp_calories'] = $goal_cals - $nutrition['calories'] + $nutrition['exercise_cals'];
+
+      $sleepFields = [
+        'duration_hours'            => 'Sleep Duration',
+        'sleep_score'               => 'Sleep Score',
+        'avg_heart_rate_bpm'        => 'Sleep Heart Rate',
+        'avg_hrv_ms'                => 'Sleep HRV',
+        'avg_respiratory_rate_brpm' => 'Sleep Respiratory Rate',
+      ];
+      $sleep = [];
+      $hasSleep = false;
+      foreach ($sleepFields as $field => $catName) {
+        $v = $getMeasBulk($catName, $export_date);
+        $sleep[$field] = $v;
+        if ($v !== null) $hasSleep = true;
+      }
+
+      $stepsKsteps    = $getMeasBulk('Steps',          $export_date);
+      $distanceKm     = $getMeasBulk('Distance',       $export_date);
+      $totalDistanceKm= $getMeasBulk('Total Distance', $export_date);
+
+      $bodyFatPct   = $getMeasBulk('Body Fat',            $export_date);
+      $muscleMassKg = $getMeasBulk('Muscle Mass',         $export_date);
+      $boneMassKg   = $getMeasBulk('Bone Mass',           $export_date);
+      $bmrWithings  = $getMeasBulk('Basal Metabolic Rate',$export_date);
+      $metabAge     = $getMeasBulk('Metabolic Age',       $export_date);
+      $visceralFat  = $getMeasBulk('Visceral Fat',        $export_date);
+      $hydration    = $getMeasBulk('Hydration',           $export_date);
+
+      // Metabolism — Mifflin-St Jeor, device-assisted TDEE when available
+      $metabolism = ['bmr_kcal' => null, 'tdee_kcal' => null, 'deficit_kcal' => null, 'tdee_source' => null];
+      if ($weight_lb) {
+        $exp_weight_kg  = $weight_lb / 2.20462;
+        $exp_bmr        = round(10 * $exp_weight_kg + 6.25 * 172 - 5 * 44 + 5); // height 172cm, age 44, male
+        $exp_active_cal = $getMeasBulk('Daily Active Calories', $export_date) ?? 0;
+        if ($exp_active_cal > 0) {
+          $exp_tdee   = round($exp_bmr + $exp_active_cal);
+          $exp_source = 'device';
+        } else {
+          $exp_tdee   = round($exp_bmr * 1.55);
+          $exp_source = 'estimated';
+        }
+        $metabolism = [
+          'bmr_kcal'     => (int)$exp_bmr,
+          'tdee_kcal'    => $exp_tdee,
+          'deficit_kcal' => $exp_tdee - $nutrition['calories'],
+          'tdee_source'  => $exp_source,
+        ];
+      }
+
+      $export_data[] = [
+        'date'      => $export_date,
+        'weight'    => ['current_lb' => $weight_lb, 'date_of_reading' => $export_date],
+        'nutrition' => $nutrition,
+        'sleep'     => $hasSleep ? $sleep : null,
+        'activity'  => [
+          'steps'               => $stepsKsteps     !== null ? (int)round($stepsKsteps * 1000)       : null,
+          'workout_distance_mi' => $distanceKm      !== null ? round($distanceKm     * 0.621371, 2)  : null,
+          'total_distance_mi'   => $totalDistanceKm !== null ? round($totalDistanceKm * 0.621371, 2) : null,
+        ],
+        'bodycomp'  => [
+          'body_fat_pct'       => $bodyFatPct,
+          'muscle_mass_lbs'    => $muscleMassKg !== null ? round($muscleMassKg * 2.20462, 2) : null,
+          'bone_mass_lbs'      => $boneMassKg   !== null ? round($boneMassKg   * 2.20462, 2) : null,
+          'bmr_device_kcal'    => $bmrWithings,
+          'metabolic_age'      => $metabAge,
+          'visceral_fat_index' => $visceralFat,
+          'hydration_pct'      => $hydration,
+        ],
+        'vitals'    => [
+          'resting_hr_bpm'       => $getMeasBulk('Resting Heart Rate', $export_date),
+          'active_calories_kcal' => $getMeasBulk('AH Active Calories', $export_date),
+        ],
+        'metabolism' => $metabolism,
+      ];
     }
 
     if ($export === 'json') {
@@ -1275,10 +1465,10 @@ try {
       // CSV Headers
       fputcsv($csv, [
         'Date', 'Weight (lbs)',
-        'Calories', 'Goal Cals', 'Remaining Cals', 'Exercise Cals',
+        'Calories', 'Goal Cals', 'MFP Remaining Cals', 'Workout Cals (MFP)',
         'Protein (g)', 'Carbs (g)', 'Fat (g)', 'Sodium (mg)', 'Fiber (g)', 'Sugar (g)',
         'Sleep Duration (hrs)', 'Sleep Score', 'Sleep HR (bpm)', 'HRV (ms)', 'Resp Rate (brpm)',
-        'Steps', 'Distance (mi)',
+        'Steps', 'Workout Distance (mi)', 'Total Distance (mi)',
         'Body Fat (%)', 'Muscle Mass (lbs)', 'Bone Mass (lbs)', 'Metabolic Age', 'Visceral Fat',
         'Resting HR (bpm)', 'Active Calories (kcal)',
         'BMR (kcal)', 'TDEE (kcal)', 'Deficit (kcal)'
@@ -1291,7 +1481,7 @@ try {
           $day['weight']['current_lb'] ?? '',
           $day['nutrition']['calories'] ?? '',
           $day['nutrition']['goal_calories'] ?? '',
-          $day['nutrition']['remaining_calories'] ?? '',
+          $day['nutrition']['remaining_mfp_calories'] ?? '',
           $day['nutrition']['exercise_cals'] ?? '',
           $day['nutrition']['protein_g'] ?? '',
           $day['nutrition']['carbs_g'] ?? '',
@@ -1305,7 +1495,8 @@ try {
           $day['sleep']['avg_hrv_ms'] ?? '',
           $day['sleep']['avg_respiratory_rate_brpm'] ?? '',
           $day['activity']['steps'] ?? '',
-          $day['activity']['distance_mi'] ?? '',
+          $day['activity']['workout_distance_mi'] ?? '',
+          $day['activity']['total_distance_mi'] ?? '',
           $day['bodycomp']['body_fat_pct'] ?? '',
           $day['bodycomp']['muscle_mass_lbs'] ?? '',
           $day['bodycomp']['bone_mass_lbs'] ?? '',
@@ -1340,11 +1531,11 @@ try {
 
     echo "## Weight\n";
     echo "- **Current Weight:** " . ($data['weight']['current_lb'] ?? 'N/A') . " lbs\n";
-    if (isset($data['weight']['starting_weight_lb'], $data['weight']['starting_date'])) {
-      echo "- **Starting Weight:** " . $data['weight']['starting_weight_lb'] . " lbs (on {$data['weight']['starting_date']})\n";
+    if (isset($data['weight']['journey_start_weight_lb'], $data['weight']['journey_start_date'])) {
+      echo "- **Starting Weight:** " . $data['weight']['journey_start_weight_lb'] . " lbs (on {$data['weight']['journey_start_date']})\n";
     }
-    echo "- **7-day Average:** " . (isset($data['weight']['trend_7d_lb']) ? round($data['weight']['trend_7d_lb'], 1) : 'N/A') . " lbs\n";
-    echo "- **30-day Average:** " . (isset($data['weight']['trend_30d_lb']) ? round($data['weight']['trend_30d_lb'], 1) : 'N/A') . " lbs\n";
+    echo "- **7-day Average:** " . (isset($data['weight']['trend_7d_lb']) ? round($data['weight']['trend_7d_lb'], 2) : 'N/A') . " lbs\n";
+    echo "- **30-day Average:** " . (isset($data['weight']['trend_30d_lb']) ? round($data['weight']['trend_30d_lb'], 2) : 'N/A') . " lbs\n";
     if (isset($data['weight']['total_change_lb'])) {
       echo "- **Total Change:** " . ($data['weight']['total_change_lb'] > 0 ? '+' : '') . $data['weight']['total_change_lb'] . " lbs (from starting weight)\n";
     }
@@ -1352,8 +1543,8 @@ try {
 
     echo "## Nutrition\n";
     echo "- **Calories:** {$data['nutrition']['calories']} / " . ($data['nutrition']['goal_calories'] ?? 'N/A') . " kcal";
-    if ($data['nutrition']['remaining_calories'] !== null) {
-      echo " (" . ($data['nutrition']['remaining_calories'] > 0 ? '' : '') . round($data['nutrition']['remaining_calories']) . " remaining)";
+    if ($data['nutrition']['remaining_mfp_calories'] !== null) {
+      echo " (" . ($data['nutrition']['remaining_mfp_calories'] > 0 ? '' : '') . round($data['nutrition']['remaining_mfp_calories']) . " remaining)";
     }
     echo "\n";
     if (isset($data['nutrition']['protein_g']) && $data['nutrition']['protein_g'] !== null) {
@@ -1398,7 +1589,8 @@ try {
     echo "\n";
 
     echo "## Metabolism\n";
-    echo "- **BMR:** {$data['metabolism']['bmr_kcal']} kcal (Basal Metabolic Rate - calories burned at rest)\n";
+    $bmr_src = $data['metabolism']['bmr_device_kcal'] !== null ? 'Withings scale' : 'Mifflin-St Jeor';
+    echo "- **BMR:** {$data['metabolism']['bmr_kcal']} kcal ({$bmr_src})\n";
     echo "- **TDEE:** {$data['metabolism']['tdee_kcal']} kcal (Total Daily Energy Expenditure)\n";
     $deficit_sign = $data['metabolism']['deficit_kcal'] >= 0 ? '+' : '';
     echo "- **Daily Deficit:** {$deficit_sign}{$data['metabolism']['deficit_kcal']} kcal";
@@ -1432,15 +1624,25 @@ try {
       echo "\n";
     }
 
-    if (isset($data['workouts']['sessions_today']) && $data['workouts']['sessions_today'] > 0) {
-      echo "## Workouts\n";
-      echo "- **Sessions:** {$data['workouts']['sessions_today']}\n";
-      foreach ($data['workouts']['sessions'] as $i => $session) {
+    if (!empty($data['workouts']['sessions'])) {
+      $sessions = $data['workouts']['sessions'];
+      $totals   = $data['workouts']['totals'];
+      echo "## Workouts (" . count($sessions) . " session" . (count($sessions) > 1 ? 's' : '') . ")\n";
+      foreach ($sessions as $i => $s) {
         $num = $i + 1;
-        echo "\n### Session $num\n";
-        if (isset($session['workout_name'])) echo "- Workout: {$session['workout_name']}\n";
-        if (isset($session['time'])) echo "- Time: {$session['time']}\n";
-        if (isset($session['notes']) && $session['notes']) echo "- Notes: {$session['notes']}\n";
+        echo "\n### Session $num — {$s['type']}\n";
+        if ($s['time'])         echo "- Time: {$s['time']}\n";
+        if ($s['duration_min']) echo "- Duration: {$s['duration_min']} min\n";
+        if ($s['dist_mi'])      echo "- Distance: {$s['dist_mi']} mi\n";
+        if ($s['active_cal'])   echo "- Active Calories: {$s['active_cal']} kcal\n";
+        if ($s['steps'])        echo "- Steps: " . number_format($s['steps']) . "\n";
+      }
+      if (count($sessions) > 1) {
+        echo "\n### Totals\n";
+        if ($totals['dist_mi'])      echo "- Distance: {$totals['dist_mi']} mi\n";
+        if ($totals['active_cal'])   echo "- Active Calories: {$totals['active_cal']} kcal\n";
+        if ($totals['steps'])        echo "- Steps: " . number_format($totals['steps']) . "\n";
+        if ($totals['duration_min']) echo "- Duration: {$totals['duration_min']} min\n";
       }
       echo "\n";
     }
@@ -1718,23 +1920,23 @@ try {
           <span class="label">AS OF:</span>
           <span class="value"><?php echo $data['weight']['date_of_reading'] ?? 'N/A'; ?></span>
         </div>
-        <?php if (isset($data['weight']['starting_weight_lb'])): ?>
+        <?php if (isset($data['weight']['journey_start_weight_lb'])): ?>
         <div class="data-row">
           <span class="label">STARTING:</span>
-          <span class="value"><?php echo $data['weight']['starting_weight_lb']; ?> lbs (<?php echo $data['weight']['starting_date']; ?>)</span>
+          <span class="value"><?php echo $data['weight']['journey_start_weight_lb']; ?> lbs (<?php echo $data['weight']['journey_start_date']; ?>)</span>
         </div>
         <?php endif; ?>
         <div class="data-row">
           <span class="label">7-DAY TREND:</span>
-          <span class="value"><?php echo isset($data['weight']['trend_7d_lb']) ? round($data['weight']['trend_7d_lb'], 1) : 'N/A'; ?> lbs</span>
+          <span class="value"><?php echo isset($data['weight']['trend_7d_lb']) ? round($data['weight']['trend_7d_lb'], 2) : 'N/A'; ?> lbs</span>
         </div>
         <div class="data-row">
           <span class="label">30-DAY TREND:</span>
-          <span class="value"><?php echo isset($data['weight']['trend_30d_lb']) ? round($data['weight']['trend_30d_lb'], 1) : 'N/A'; ?> lbs</span>
+          <span class="value"><?php echo isset($data['weight']['trend_30d_lb']) ? round($data['weight']['trend_30d_lb'], 2) : 'N/A'; ?> lbs</span>
         </div>
         <div class="data-row">
           <span class="label">90-DAY TREND:</span>
-          <span class="value"><?php echo isset($data['weight']['trend_90d_lb']) ? round($data['weight']['trend_90d_lb'], 1) : 'N/A'; ?> lbs</span>
+          <span class="value"><?php echo isset($data['weight']['trend_90d_lb']) ? round($data['weight']['trend_90d_lb'], 2) : 'N/A'; ?> lbs</span>
         </div>
         <?php if (isset($data['weight']['total_change_lb'])): ?>
         <div class="data-row">
@@ -1772,10 +1974,10 @@ try {
           <span class="value"><?php echo round($data['nutrition']['exercise_cals']); ?> kcal</span>
         </div>
         <?php endif; ?>
-        <?php if ($data['nutrition']['remaining_calories'] !== null): ?>
+        <?php if ($data['nutrition']['remaining_mfp_calories'] !== null): ?>
         <div class="data-row">
           <span class="label">REMAINING:</span>
-          <span class="value"><?php echo round($data['nutrition']['remaining_calories']); ?> kcal</span>
+          <span class="value"><?php echo round($data['nutrition']['remaining_mfp_calories']); ?> kcal</span>
         </div>
         <?php endif; ?>
         <div class="data-row">
@@ -1833,38 +2035,53 @@ try {
           <span class="label">BMR:</span>
           <span class="value highlight"><?php echo $data['metabolism']['bmr_kcal']; ?> kcal</span>
         </div>
-        <div class="data-row" style="font-size: 0.85em; color: #888;">
+        <div class="data-row" style="font-size:0.85em;color:#888;">
           <span class="label"></span>
-          <span class="value">Basal Metabolic Rate (at rest)</span>
+          <?php if ($data['metabolism']['bmr_device_kcal'] !== null): ?>
+          <span class="value" style="color:#00CC28;">Withings scale (body composition) ✓
+            <span style="color:#555;"> — calculated: <?php echo $data['metabolism']['bmr_calculated_kcal']; ?> kcal</span>
+          </span>
+          <?php else: ?>
+          <span class="value">Mifflin-St Jeor formula (no scale reading today)</span>
+          <?php endif; ?>
         </div>
+        <?php if (($data['metabolism']['tdee_source'] ?? '') === 'device'): ?>
+        <div class="data-row">
+          <span class="label">ACTIVE BURN:</span>
+          <span class="value"><?php echo $data['energy']['daily_active_kcal_device']; ?> kcal</span>
+        </div>
+        <div class="data-row" style="font-size:0.85em;color:#888;">
+          <span class="label"></span>
+          <span class="value">Measured by Apple Watch / Withings</span>
+        </div>
+        <?php endif; ?>
         <div class="data-row">
           <span class="label">TDEE:</span>
           <span class="value highlight"><?php echo $data['metabolism']['tdee_kcal']; ?> kcal</span>
         </div>
-        <div class="data-row" style="font-size: 0.85em; color: #888;">
+        <div class="data-row" style="font-size:0.85em;color:#888;">
           <span class="label"></span>
-          <span class="value">Total Daily Energy Expenditure</span>
+          <?php if ($data['metabolism']['tdee_source'] === 'device'): ?>
+          <span class="value" style="color:#00CC28;">BMR + Active Burn (device-measured ✓)</span>
+          <?php else: ?>
+          <span class="value" style="color:#888;">BMR × 1.55 estimate (no device data today)</span>
+          <?php endif; ?>
         </div>
         <div class="data-row">
           <span class="label">DAILY DEFICIT:</span>
-          <span class="value highlight" style="color: <?php echo $data['metabolism']['deficit_kcal'] >= 0 ? '#00FF00' : '#FF4444'; ?>">
-            <?php
-              echo ($data['metabolism']['deficit_kcal'] >= 0 ? '+' : '') . $data['metabolism']['deficit_kcal'];
-            ?> kcal
+          <span class="value highlight" style="color:<?php echo $data['metabolism']['deficit_kcal'] >= 0 ? '#00FF00' : '#FF4444'; ?>">
+            <?php echo ($data['metabolism']['deficit_kcal'] >= 0 ? '+' : '') . $data['metabolism']['deficit_kcal']; ?> kcal
           </span>
         </div>
-        <div class="data-row" style="font-size: 0.85em; color: #888;">
+        <div class="data-row" style="font-size:0.85em;color:#888;">
           <span class="label"></span>
           <span class="value">
             <?php
-              if ($data['metabolism']['deficit_kcal'] > 0) {
-                echo 'Deficit (losing weight)';
-              } elseif ($data['metabolism']['deficit_kcal'] < 0) {
-                echo 'Surplus (gaining weight)';
-              } else {
-                echo 'Maintenance';
-              }
+              if ($data['metabolism']['deficit_kcal'] > 0)      echo 'Deficit — losing weight';
+              elseif ($data['metabolism']['deficit_kcal'] < 0)  echo 'Surplus — gaining weight';
+              else                                               echo 'Maintenance';
             ?>
+            &nbsp;(TDEE − food intake)
           </span>
         </div>
       </div>
@@ -2310,12 +2527,130 @@ try {
     </div>
     <?php endif; ?>
 
+    <!-- WORKOUTS SECTION -->
+    <?php
+      $actSteps     = $data['activity']['steps']             ?? null;
+      $actTotalMi   = $data['activity']['total_distance_mi'] ?? null;
+      $actCalories  = $data['measurements']['categories']['Daily Active Calories']['value'] ?? null;
+      $wSessions    = $data['workouts']['sessions'] ?? [];
+      $wTotals      = $data['workouts']['totals']   ?? [];
+      $hasWorkouts  = !empty($wSessions);
+      $hasActivity  = $actSteps !== null || $actTotalMi !== null;
+    ?>
+    <?php if ($hasWorkouts || $hasActivity): ?>
+    <div class="section">
+      <h2>▌WORKOUTS</h2>
+
+      <?php if ($hasWorkouts): ?>
+      <!-- Individual session cards -->
+      <?php foreach ($wSessions as $i => $s): ?>
+      <div style="<?php echo $i > 0 ? 'margin-top:14px;padding-top:14px;border-top:1px solid rgba(0,255,65,0.2);' : ''; ?>">
+        <div style="color:#00FF41;font-size:0.8em;letter-spacing:2px;margin-bottom:8px;">
+          SESSION <?php echo $i + 1; ?> &mdash; <?php echo strtoupper($s['type']); ?>
+          <?php if ($s['time']): ?><span style="color:#888;margin-left:8px;"><?php echo $s['time']; ?></span><?php endif; ?>
+          <?php if ($s['duration_min']): ?><span style="color:#666;margin-left:8px;"><?php echo $s['duration_min']; ?> min</span><?php endif; ?>
+        </div>
+        <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;">
+          <?php if ($s['dist_mi'] !== null): ?>
+          <div class="data-row">
+            <span class="label">DISTANCE:</span>
+            <span class="value"><?php echo $s['dist_mi']; ?> mi</span>
+          </div>
+          <?php endif; ?>
+          <?php if ($s['active_cal'] !== null): ?>
+          <div class="data-row">
+            <span class="label">ACTIVE CAL:</span>
+            <span class="value"><?php echo number_format($s['active_cal']); ?> kcal</span>
+          </div>
+          <?php endif; ?>
+          <?php if ($s['steps'] !== null): ?>
+          <div class="data-row">
+            <span class="label">STEPS:</span>
+            <span class="value"><?php echo number_format($s['steps']); ?></span>
+          </div>
+          <?php endif; ?>
+        </div>
+      </div>
+      <?php endforeach; ?>
+
+      <?php if (count($wSessions) > 1): ?>
+      <!-- Totals row -->
+      <div style="margin-top:14px;padding-top:14px;border-top:1px solid rgba(0,255,65,0.4);">
+        <div style="color:#00FF41;font-size:0.8em;letter-spacing:2px;margin-bottom:8px;">TOTALS</div>
+        <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;">
+          <?php if ($wTotals['dist_mi'] > 0): ?>
+          <div class="data-row">
+            <span class="label">DISTANCE:</span>
+            <span class="value highlight"><?php echo $wTotals['dist_mi']; ?> mi</span>
+          </div>
+          <?php endif; ?>
+          <?php if ($wTotals['active_cal'] > 0): ?>
+          <div class="data-row">
+            <span class="label">ACTIVE CAL:</span>
+            <span class="value highlight"><?php echo number_format($wTotals['active_cal']); ?> kcal</span>
+          </div>
+          <?php endif; ?>
+          <?php if ($wTotals['steps'] > 0): ?>
+          <div class="data-row">
+            <span class="label">STEPS:</span>
+            <span class="value highlight"><?php echo number_format($wTotals['steps']); ?></span>
+          </div>
+          <?php endif; ?>
+          <?php if ($wTotals['duration_min'] > 0): ?>
+          <div class="data-row">
+            <span class="label">DURATION:</span>
+            <span class="value highlight"><?php echo $wTotals['duration_min']; ?> min</span>
+          </div>
+          <?php endif; ?>
+        </div>
+      </div>
+      <?php endif; ?>
+
+      <!-- Day-wide stats separator -->
+      <div style="margin-top:18px;padding-top:14px;border-top:1px solid rgba(0,255,65,0.15);">
+        <div style="color:#555;font-size:0.75em;letter-spacing:2px;margin-bottom:8px;">ALL-DAY</div>
+        <div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;">
+      <?php else: ?>
+      <!-- No sessions — just show day-wide stats -->
+      <div><div class="grid" style="grid-template-columns:repeat(auto-fit,minmax(160px,1fr));gap:8px;">
+      <?php endif; ?>
+
+          <?php if ($actSteps !== null): ?>
+          <div class="data-row">
+            <span class="label">TOTAL STEPS:</span>
+            <span class="value <?php echo $actSteps >= 10000 ? 'highlight' : ''; ?>">
+              <?php echo number_format($actSteps); ?><?php echo $actSteps >= 10000 ? ' ✓' : ''; ?>
+            </span>
+          </div>
+          <?php endif; ?>
+          <?php if ($actTotalMi !== null): ?>
+          <div class="data-row">
+            <span class="label">TOTAL DISTANCE:</span>
+            <span class="value"><?php echo $actTotalMi; ?> mi</span>
+          </div>
+          <?php endif; ?>
+          <?php if ($actCalories !== null): ?>
+          <div class="data-row">
+            <span class="label">ACTIVE CAL:</span>
+            <span class="value"><?php echo number_format($actCalories, 1); ?> kcal</span>
+          </div>
+          <?php endif; ?>
+
+      </div></div><!-- end all-day grid -->
+    </div>
+    <?php endif; ?>
+
     <?php if (!empty($data['measurements']['categories'])): ?>
     <!-- MEASUREMENTS SECTION -->
     <div class="section">
       <h2>▌BODY MEASUREMENTS</h2>
       <div class="grid" style="grid-template-columns: repeat(auto-fit, minmax(200px, 1fr));">
+        <?php
+          // These are shown in the WORKOUTS section above — exclude from body measurements
+          $activityCats = ['Steps', 'Distance', 'Total Distance', 'Daily Active Calories'];
+        ?>
         <?php foreach ($data['measurements']['categories'] as $name => $info): ?>
+        <?php if (in_array($name, $activityCats)) continue; ?>
         <div class="data-row">
           <span class="label"><?php echo strtoupper($name); ?>:</span>
           <span class="value"><?php echo $info['value']; ?> <?php echo $info['unit'] ?? ''; ?></span>
@@ -2325,39 +2660,6 @@ try {
     </div>
     <?php endif; ?>
 
-    <?php if (isset($data['workouts']['sessions_today']) && $data['workouts']['sessions_today'] > 0): ?>
-    <!-- WORKOUTS SECTION -->
-    <div class="section">
-      <h2>▌WORKOUT DATA</h2>
-      <div class="data-row">
-        <span class="label">SESSIONS TODAY:</span>
-        <span class="value highlight"><?php echo $data['workouts']['sessions_today']; ?></span>
-      </div>
-      <?php foreach ($data['workouts']['sessions'] as $i => $session): ?>
-        <div style="margin-top: 15px; padding-top: 15px; border-top: 1px solid rgba(0, 255, 65, 0.3);">
-          <div class="highlight">SESSION <?php echo $i + 1; ?></div>
-          <?php if (isset($session['workout_name'])): ?>
-          <div class="data-row">
-            <span class="label">WORKOUT:</span>
-            <span class="value"><?php echo $session['workout_name']; ?></span>
-          </div>
-          <?php endif; ?>
-          <?php if (isset($session['time'])): ?>
-          <div class="data-row">
-            <span class="label">TIME:</span>
-            <span class="value"><?php echo $session['time']; ?></span>
-          </div>
-          <?php endif; ?>
-          <?php if (isset($session['notes']) && $session['notes']): ?>
-          <div class="data-row">
-            <span class="label">NOTES:</span>
-            <span class="value"><?php echo $session['notes']; ?></span>
-          </div>
-          <?php endif; ?>
-        </div>
-      <?php endforeach; ?>
-    </div>
-    <?php endif; ?>
 
     <?php if (!empty($data['records'])): ?>
     <?php $rec = $data['records']; ?>
@@ -2404,11 +2706,11 @@ try {
             <div style="color:#555;font-size:1.4em;font-weight:bold;"><?php echo $rec['weight_all_time_high']; ?> lbs</div>
           </div>
           <?php endif; ?>
-          <?php if (isset($rec['weight_start'], $rec['weight_start_date'])): ?>
+          <?php if (isset($rec['lifetime_weight_start'], $rec['lifetime_weight_start_date'])): ?>
           <div style="border:1px solid rgba(0,255,65,0.3);padding:12px;">
-            <div style="color:#00AA22;font-size:0.7em;letter-spacing:1px;">FIRST RECORDED</div>
-            <div style="color:#888;font-size:1.4em;font-weight:bold;"><?php echo $rec['weight_start']; ?> lbs</div>
-            <div style="color:#444;font-size:0.7em;"><?php echo $rec['weight_start_date']; ?></div>
+            <div style="color:#00AA22;font-size:0.7em;letter-spacing:1px;">LIFETIME FIRST RECORDED</div>
+            <div style="color:#888;font-size:1.4em;font-weight:bold;"><?php echo $rec['lifetime_weight_start']; ?> lbs</div>
+            <div style="color:#444;font-size:0.7em;"><?php echo $rec['lifetime_weight_start_date']; ?></div>
           </div>
           <?php endif; ?>
         </div>
@@ -2487,12 +2789,12 @@ try {
 
     echo "--- WEIGHT ---\n";
     echo "Current: " . ($data['weight']['current_lb'] ?? 'N/A') . " lbs (as of {$data['weight']['date_of_reading']})\n";
-    if (isset($data['weight']['starting_weight_lb'], $data['weight']['starting_date'])) {
-      echo "Starting: " . $data['weight']['starting_weight_lb'] . " lbs (on {$data['weight']['starting_date']})\n";
+    if (isset($data['weight']['journey_start_weight_lb'], $data['weight']['journey_start_date'])) {
+      echo "Starting: " . $data['weight']['journey_start_weight_lb'] . " lbs (on {$data['weight']['journey_start_date']})\n";
     }
-    echo "7-day trend: " . (isset($data['weight']['trend_7d_lb']) ? round($data['weight']['trend_7d_lb'], 1) : 'N/A') . " lbs\n";
-    echo "30-day trend: " . (isset($data['weight']['trend_30d_lb']) ? round($data['weight']['trend_30d_lb'], 1) : 'N/A') . " lbs\n";
-    echo "90-day trend: " . (isset($data['weight']['trend_90d_lb']) ? round($data['weight']['trend_90d_lb'], 1) : 'N/A') . " lbs\n";
+    echo "7-day trend: " . (isset($data['weight']['trend_7d_lb']) ? round($data['weight']['trend_7d_lb'], 2) : 'N/A') . " lbs\n";
+    echo "30-day trend: " . (isset($data['weight']['trend_30d_lb']) ? round($data['weight']['trend_30d_lb'], 2) : 'N/A') . " lbs\n";
+    echo "90-day trend: " . (isset($data['weight']['trend_90d_lb']) ? round($data['weight']['trend_90d_lb'], 2) : 'N/A') . " lbs\n";
     if (isset($data['weight']['total_change_lb'])) {
       echo "Total change: " . ($data['weight']['total_change_lb'] > 0 ? '+' : '') . $data['weight']['total_change_lb'] . " lbs (from starting weight)\n";
     }
@@ -2503,8 +2805,8 @@ try {
     if ($data['nutrition']['exercise_cals'] > 0) {
       echo "Exercise Burned: " . round($data['nutrition']['exercise_cals']) . " kcal\n";
     }
-    if ($data['nutrition']['remaining_calories'] !== null) {
-      echo "Remaining: " . round($data['nutrition']['remaining_calories']) . " kcal\n";
+    if ($data['nutrition']['remaining_mfp_calories'] !== null) {
+      echo "Remaining: " . round($data['nutrition']['remaining_mfp_calories']) . " kcal\n";
     }
     echo "Protein: " . round($data['nutrition']['protein_g'], 1) . " g\n";
     echo "Carbs: " . round($data['nutrition']['carbs_g'], 1) . " g\n";
@@ -2569,15 +2871,22 @@ try {
       echo "\n";
     }
 
-    if (isset($data['workouts']['sessions_today']) && $data['workouts']['sessions_today'] > 0) {
-      echo "--- WORKOUTS ---\n";
-      echo "Sessions today: {$data['workouts']['sessions_today']}\n";
-      foreach ($data['workouts']['sessions'] as $i => $session) {
+    if (!empty($data['workouts']['sessions'])) {
+      $sessions = $data['workouts']['sessions'];
+      $totals   = $data['workouts']['totals'];
+      echo "--- WORKOUTS (" . count($sessions) . " session" . (count($sessions) > 1 ? 's' : '') . ") ---\n";
+      foreach ($sessions as $i => $s) {
         $num = $i + 1;
-        echo "\nSession $num:\n";
-        if (isset($session['workout_name'])) echo "  Workout: {$session['workout_name']}\n";
-        if (isset($session['time'])) echo "  Time: {$session['time']}\n";
-        if (isset($session['notes']) && $session['notes']) echo "  Notes: {$session['notes']}\n";
+        echo "Session $num: {$s['type']}";
+        if ($s['time'])         echo " at {$s['time']}";
+        if ($s['duration_min']) echo " ({$s['duration_min']} min)";
+        echo "\n";
+        if ($s['dist_mi'])    echo "  Distance: {$s['dist_mi']} mi\n";
+        if ($s['active_cal']) echo "  Active Cal: {$s['active_cal']} kcal\n";
+        if ($s['steps'])      echo "  Steps: " . number_format($s['steps']) . "\n";
+      }
+      if (count($sessions) > 1) {
+        echo "TOTALS: {$totals['dist_mi']} mi | {$totals['active_cal']} kcal | " . number_format($totals['steps']) . " steps | {$totals['duration_min']} min\n";
       }
       echo "\n";
     }
